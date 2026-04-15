@@ -10,7 +10,7 @@ import {
   type Track,
 } from '~/composables/useScheduler'
 import { useMidi } from '~/composables/useMidi'
-import { useMidiIn } from '~/composables/useMidiIn'
+import { useMidiIn, MAPPABLE_CONTROLS } from '~/composables/useMidiIn'
 import MeterKnob from '~/components/MeterKnob.vue'
 
 // ── Meter vocabulary ───────────────────────────────────
@@ -131,15 +131,38 @@ midiFireRef.current = (id) => {
 }
 
 // ── MIDI IN ────────────────────────────────────────────
-const midiIn = useMidiIn()
+const midiIn = useMidiIn({
+  onPlay: () => { if (!playing.value) play() },
+  onStop: () => { if (playing.value) stop() },
+  onCCMapped: (controlId, rawValue) => {
+    if (controlId === 'bpm') {
+      bpm.value = Math.round(rawValue * 2 + 40)
+    } else if (controlId === 'masterN') {
+      masterNum.value = Math.round((rawValue / 127) * 16)
+      onMasterKnobChange()
+    } else if (controlId === 'masterD' && rawValue > 63) {
+      const opts = [4, 8, 16] as const
+      masterDen.value = opts[(opts.indexOf(masterDen.value as 4|8|16) + 1) % 3]
+      onMasterKnobChange()
+    } else if (controlId === 'master_apply' && rawValue > 63) {
+      commitMaster()
+    } else if (controlId.startsWith('track') && controlId.endsWith('_mute') && rawValue > 63) {
+      const idx = parseInt(controlId.replace('track', '').replace('_mute', ''))
+      if (!isNaN(idx)) doMute(idx)
+    }
+  },
+})
 
-// For external clock sync: override bpmRaw when syncBpm is active
+// External clock sync: when syncBpm changes, update bpmRaw and display
 watch(() => midiIn.state.syncBpm, (v) => {
-  if (midiIn.state.syncMode === 'external' && v) {
+  if (midiIn.state.syncMode === 'external' && v !== null) {
     bpmRaw.current = v
     bpm.value = v
   }
 })
+
+// Mapping panel visibility toggle
+const showMapping = ref(false)
 
 // Sync reactive → raw mirrors for the scheduler.
 watch(bpm, (v) => { bpmRaw.current = v })
@@ -181,7 +204,7 @@ function handleMasterReset() {
 }
 
 onMounted(async () => {
-  // Init MIDI IN (note receive, transpose, sync)
+  // Init MIDI IN (transport control, clock sync, mapping)
   await midiIn.init()
 
   scheduler = createScheduler({
@@ -528,7 +551,7 @@ function gridMaxHeightPx(len: number): number {
           </select>
         </div>
 
-        <!-- MIDI IN -->
+        <!-- MIDI IN device select -->
         <div class="flex items-center gap-1.5">
           <span class="text-[10px] text-[#444]">MIDI IN</span>
           <select
@@ -543,14 +566,8 @@ function gridMaxHeightPx(len: number): number {
           <span v-else class="text-[10px] text-[#666]">unsupported</span>
         </div>
 
-        <!-- Transpose display -->
-        <div class="flex items-center gap-1.5" v-if="midiIn.state.selectedId">
-          <span class="text-[10px] text-[#444]">TRANS</span>
-          <span class="text-[11px] min-w-[24px]">{{ midiIn.state.transpose > 0 ? '+' : '' }}{{ midiIn.state.transpose }}</span>
-        </div>
-
-        <!-- Sync mode -->
-        <div class="flex items-center gap-0.5 rounded-sm overflow-hidden border border-[#222]" v-if="midiIn.state.selectedId">
+        <!-- Sync: clock from external device -->
+        <div v-if="midiIn.state.selectedId" class="flex items-center gap-0.5 rounded-sm overflow-hidden border border-[#222]">
           <button
             class="text-[9px] px-1.5 py-1 font-mono"
             :class="midiIn.state.syncMode === 'internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555]'"
@@ -561,26 +578,70 @@ function gridMaxHeightPx(len: number): number {
             :class="midiIn.state.syncMode === 'external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555]'"
             @click="midiIn.state.syncMode = 'external'"
           >SYNC</button>
+          <span
+            v-if="midiIn.state.syncMode === 'external' && midiIn.state.syncBpm"
+            class="text-[9px] px-1.5 text-[#8fccaa]"
+          >{{ midiIn.state.syncBpm }}</span>
         </div>
 
-        <!-- Mapping: download / load config -->
-        <div class="flex items-center gap-1" v-if="midiIn.state.selectedId">
+        <!-- Mapping panel toggle + save/load -->
+        <div v-if="midiIn.state.selectedId" class="flex items-center gap-1">
+          <button
+            class="text-[9px] px-2 py-1 font-mono border rounded-sm"
+            :class="showMapping ? 'bg-[#2a2a2a] text-[#ddd] border-[#555]' : 'bg-transparent text-[#666] border-[#333]'"
+            @click="showMapping = !showMapping"
+          >MAPPING</button>
           <button
             class="text-[9px] px-2 py-1 font-mono border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
             @click="downloadMidiConfig"
-          >SAVE CFG</button>
+          >SAVE</button>
           <button
             class="text-[9px] px-2 py-1 font-mono border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
             @click="triggerLoadMidiConfig"
-          >LOAD CFG</button>
-          <input
-            ref="midiConfigInput"
-            type="file"
-            accept=".json"
-            style="display: none"
-            @change="onMidiConfigLoaded"
-          />
+          >LOAD</button>
+          <input ref="midiConfigInput" type="file" accept=".json" style="display:none" @change="onMidiConfigLoaded" />
         </div>
+      </div>
+    </div>
+
+    <!-- MIDI Mapping panel — collapsible, shown when MAPPING button active -->
+    <div
+      v-if="showMapping && midiIn.state.selectedId"
+      class="mb-2 p-2 border border-[#1e1e1e] bg-[#0c0c0c] flex flex-wrap gap-2"
+    >
+      <div
+        v-for="ctrl in MAPPABLE_CONTROLS"
+        :key="ctrl.id"
+        class="flex items-center gap-1.5 border border-[#1a1a1a] px-2 py-1 rounded-sm min-w-0"
+      >
+        <span class="text-[9px] text-[#555] w-[120px] truncate">{{ ctrl.label }}</span>
+        <!-- Current binding display -->
+        <span class="text-[9px] font-mono min-w-[70px]">
+          <template v-if="midiIn.getMappingFor(ctrl.id)">
+            <span class="text-[#8faacc]">
+              {{ midiIn.getMappingFor(ctrl.id)!.type.toUpperCase() }}
+              {{ midiIn.getMappingFor(ctrl.id)!.number }}
+              <span class="text-[#444]">ch{{ midiIn.getMappingFor(ctrl.id)!.channel }}</span>
+            </span>
+          </template>
+          <span v-else class="text-[#333]">—</span>
+        </span>
+        <!-- Learn button -->
+        <button
+          class="text-[9px] px-1.5 py-0.5 font-mono border rounded-sm"
+          :class="midiIn.state.learnControlId === ctrl.id
+            ? 'bg-[#ff6600] text-white border-[#ff6600] animate-pulse'
+            : 'bg-transparent text-[#555] border-[#222] hover:text-[#ccc]'"
+          @click="midiIn.state.learnControlId === ctrl.id
+            ? midiIn.cancelLearn()
+            : midiIn.startLearn(ctrl.id)"
+        >{{ midiIn.state.learnControlId === ctrl.id ? '● WAIT' : 'LEARN' }}</button>
+        <!-- Clear binding -->
+        <button
+          v-if="midiIn.getMappingFor(ctrl.id)"
+          class="text-[9px] px-1 py-0.5 font-mono border border-[#222] bg-transparent text-[#555] rounded-sm hover:text-[#c66]"
+          @click="midiIn.removeMapping(ctrl.id)"
+        >✕</button>
       </div>
     </div>
 

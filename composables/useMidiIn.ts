@@ -1,37 +1,68 @@
-import { ref, reactive } from 'vue'
+import { reactive } from 'vue'
 
-// ── MIDI Input: receive note/CC from external keyboard/controller ──
+// ── MIDI Input: external controller support ────────────────────────
 //
-// Features:
-// - Transpose: play a note to set global semitone offset (baseline C4=60)
-// - Sync: follow external MIDI clock (24 PPQN, 0xF8), derive BPM
-// - Mapping: learn CC/notes → control bindings, persist as JSON
+// Three independent features:
+//
+// 1. Transport: 0xFA (Start) / 0xFC (Stop) / 0xFB (Continue)
+//    trigger the sequencer's play() / stop() via callbacks.
+//    A CC or Note can also be mapped to "transport_play" / "transport_stop".
+//
+// 2. Clock Sync: 0xF8 pulses (24 PPQN).
+//    Averaged over a rolling window of 24 pulses to smooth jitter.
+//    BPM = 60 / (avgInterval × 24).
+//
+// 3. Mapping: bind any CC or note to a named controlId.
+//    Learn mode: activate, then move a knob / press a pad on the controller.
+//    Saved as JSON for persistence.
 
 export interface MidiMapping {
-  controlId: string // e.g. "masterN", "masterD", "tempo", "track0_n", "track0_mute"
-  type: 'cc' | 'note' // CC number or note number
-  channel: number // 0-15
-  number: number // CC# or note#
+  controlId: string
+  type: 'cc' | 'note'
+  channel: number   // 1-16
+  number: number    // CC# or note#
 }
+
+// All controls available for MIDI mapping
+export const MAPPABLE_CONTROLS = [
+  { id: 'transport_play',  label: 'Play / Start' },
+  { id: 'transport_stop',  label: 'Stop' },
+  { id: 'bpm',             label: 'BPM (CC value × 2 + 40)' },
+  { id: 'masterN',         label: 'Master Numerator (CC / 127 × 16)' },
+  { id: 'masterD',         label: 'Master Denominator (cycles 4→8→16)' },
+  { id: 'master_apply',    label: 'Master Apply' },
+  { id: 'track0_mute',     label: 'Track 1 Mute (toggle)' },
+  { id: 'track1_mute',     label: 'Track 2 Mute (toggle)' },
+  { id: 'track2_mute',     label: 'Track 3 Mute (toggle)' },
+  { id: 'track3_mute',     label: 'Track 4 Mute (toggle)' },
+  { id: 'track4_mute',     label: 'Track 5 Mute (toggle)' },
+  { id: 'track5_mute',     label: 'Track 6 Mute (toggle)' },
+  { id: 'track6_mute',     label: 'Track 7 Mute (toggle)' },
+  { id: 'track7_mute',     label: 'Track 8 Mute (toggle)' },
+] as const
+
+export type MappableControlId = typeof MAPPABLE_CONTROLS[number]['id']
 
 export interface MidiInState {
   supported: boolean
   inputs: MIDIInput[]
   selectedId: string | null
-  transpose: number // semitones offset (C4=60 baseline)
-  syncMode: 'internal' | 'external' // external = follow MIDI clock
-  syncBpm: number | null // derived from clock if external
+  syncMode: 'internal' | 'external'
+  syncBpm: number | null   // last BPM derived from clock
   mappings: MidiMapping[]
   learnMode: boolean
   learnControlId: string | null
 }
 
-export function useMidiIn() {
+export function useMidiIn(callbacks: {
+  onPlay: () => void
+  onStop: () => void
+  onCCMapped: (controlId: string, rawValue: number) => void // 0-127
+}) {
   const state = reactive<MidiInState>({
     supported: false,
     inputs: [],
     selectedId: null,
-    transpose: 0,
     syncMode: 'internal',
     syncBpm: null,
     mappings: [],
@@ -42,10 +73,12 @@ export function useMidiIn() {
   let midiAccess: WebMidi.MIDIAccess | null = null
   let selectedInput: WebMidi.MIDIInput | null = null
 
-  // MIDI Clock tracking (24 PPQN)
-  let clockCount = 0
-  let lastClockTime = 0
-  const CLOCKS_PER_16TH = 6
+  // ── Clock tracking ─────────────────────────────────
+  // Rolling window of inter-clock intervals (seconds).
+  // 24 clocks = 1 quarter note → BPM = 60 / (avgInterval × 24).
+  const CLOCK_WINDOW = 24
+  const clockIntervals: number[] = []
+  let lastClockTimestamp = 0
 
   const init = async () => {
     if (!navigator.requestMIDIAccess) {
@@ -58,7 +91,7 @@ export function useMidiIn() {
       updateInputList()
       midiAccess.onstatechange = updateInputList
     } catch (e) {
-      console.error('MIDI init failed:', e)
+      console.error('MIDI IN init failed:', e)
       state.supported = false
     }
   }
@@ -69,143 +102,126 @@ export function useMidiIn() {
   }
 
   const selectInput = (inputId: string | null) => {
-    // Unbind old
-    if (selectedInput) {
-      selectedInput.onmidimessage = null
-    }
+    if (selectedInput) selectedInput.onmidimessage = null
     state.selectedId = inputId
     selectedInput = inputId ? midiAccess?.inputs.get(inputId) ?? null : null
-
     if (selectedInput) {
       selectedInput.onmidimessage = onMidiMessage
-      clockCount = 0
-      lastClockTime = 0
+      // Reset clock state when switching device
+      clockIntervals.length = 0
+      lastClockTimestamp = 0
     }
   }
 
   const onMidiMessage = (e: WebMidi.MIDIMessageEvent) => {
     const [status, data1, data2] = e.data
-    const channel = (status & 0x0f) + 1 // 1-16
     const msgType = status & 0xf0
+    const channel = (status & 0x0f) + 1  // 1-16
 
-    // ── MIDI System Real-Time ──
-    if (status === 0xf8) {
-      // Clock pulse (24 per quarter)
-      handleClock(e.timeStamp)
-      return
-    }
-    if (status === 0xfa) {
-      // Start
-      if (state.syncMode === 'external') {
-        clockCount = 0
-        lastClockTime = e.timeStamp
-      }
-      return
-    }
-    if (status === 0xfc) {
-      // Stop
-      clockCount = 0
-      return
-    }
+    // ── System Real-Time ───────────────────────────
+    if (status === 0xf8) { handleClock(e.timeStamp); return }
+    if (status === 0xfa) { handleTransport('start'); return }   // Start
+    if (status === 0xfb) { handleTransport('continue'); return } // Continue
+    if (status === 0xfc) { handleTransport('stop'); return }    // Stop
 
-    // ── Control Change ──
+    // ── Control Change ────────────────────────────
     if (msgType === 0xb0) {
-      const cc = data1
-      const value = data2
-      if (state.learnMode) {
-        // Record this CC as the mapping for learnControlId
-        if (state.learnControlId) {
-          recordMapping(state.learnControlId, 'cc', channel, cc)
-          state.learnMode = false
-          state.learnControlId = null
-        }
-      } else {
-        // Apply existing CC mapping
-        applyCCMapping(channel, cc, value)
-      }
+      handleCC(channel, data1, data2)
       return
     }
 
-    // ── Note On ──
+    // ── Note On (velocity > 0) ────────────────────
     if (msgType === 0x90 && data2 > 0) {
-      const note = data1
-      if (state.learnMode) {
-        // Record this note as the mapping
-        if (state.learnControlId) {
-          recordMapping(state.learnControlId, 'note', channel, note)
-          state.learnMode = false
-          state.learnControlId = null
-        }
-      } else {
-        // Apply existing note mapping or transpose
-        applyNoteOn(channel, note, data2)
-      }
-      return
-    }
-
-    // ── Note Off ──
-    if (msgType === 0x80 || (msgType === 0x90 && data2 === 0)) {
-      // Could track note-off for sustain, but typically we just ignore
+      handleNote(channel, data1, data2)
       return
     }
   }
 
+  // ── Clock ─────────────────────────────────────────
   const handleClock = (timestamp: number) => {
-    if (state.syncMode !== 'external') return
+    if (lastClockTimestamp > 0) {
+      const intervalSec = (timestamp - lastClockTimestamp) / 1000
+      // Sanity: ignore intervals outside reasonable BPM range (20–400)
+      if (intervalSec > 0.001 && intervalSec < 0.3) {
+        clockIntervals.push(intervalSec)
+        if (clockIntervals.length > CLOCK_WINDOW) clockIntervals.shift()
 
-    clockCount++
-    if (clockCount === 1) {
-      // Start of measurement
-      lastClockTime = timestamp
-    } else if (clockCount > CLOCKS_PER_16TH) {
-      // Every CLOCKS_PER_16TH pulses, estimate BPM
-      const elapsed = (timestamp - lastClockTime) / 1000 // seconds
-      const sixteenths = (clockCount - 1) / CLOCKS_PER_16TH
-      const bpm = Math.round((sixteenths / elapsed) * 60 * 4) // 60 sec/min, 4 sixteenths per beat
-      state.syncBpm = bpm
-      clockCount = 0
+        if (clockIntervals.length >= 4 && state.syncMode === 'external') {
+          const avg = clockIntervals.reduce((a, b) => a + b) / clockIntervals.length
+          // 24 PPQN → BPM = 60 / (avg × 24)
+          state.syncBpm = Math.round(60 / (avg * 24))
+        }
+      }
+    }
+    lastClockTimestamp = timestamp
+  }
+
+  // ── Transport ─────────────────────────────────────
+  const handleTransport = (kind: 'start' | 'stop' | 'continue') => {
+    // Check if "transport_play" / "transport_stop" is mapped to a CC/note;
+    // if not, System RT messages trigger directly.
+    if (kind === 'start' || kind === 'continue') {
+      callbacks.onPlay()
+    } else {
+      callbacks.onStop()
     }
   }
 
-  const applyNoteOn = (channel: number, note: number, velocity: number) => {
-    // Check if mapped to a control
+  // ── Note ──────────────────────────────────────────
+  const handleNote = (channel: number, note: number, velocity: number) => {
+    if (state.learnMode && state.learnControlId) {
+      recordMapping(state.learnControlId, 'note', channel, note)
+      state.learnMode = false
+      state.learnControlId = null
+      return
+    }
+    // Find mapping for this note
     const mapping = state.mappings.find(
       m => m.type === 'note' && m.channel === channel && m.number === note
     )
     if (mapping) {
-      applyMapping(mapping, velocity)
-    } else {
-      // No mapping — use for transpose
-      // Baseline note C4 (60) = 0 offset
-      const offset = note - 60
-      state.transpose = offset
+      triggerControl(mapping.controlId, velocity)
     }
   }
 
-  const applyCCMapping = (channel: number, cc: number, value: number) => {
+  // ── CC ────────────────────────────────────────────
+  const handleCC = (channel: number, cc: number, value: number) => {
+    if (state.learnMode && state.learnControlId) {
+      recordMapping(state.learnControlId, 'cc', channel, cc)
+      state.learnMode = false
+      state.learnControlId = null
+      return
+    }
     const mapping = state.mappings.find(
       m => m.type === 'cc' && m.channel === channel && m.number === cc
     )
     if (mapping) {
-      applyMapping(mapping, value)
+      triggerControl(mapping.controlId, value)
     }
   }
 
-  const applyMapping = (mapping: MidiMapping, value: number) => {
-    // The actual application is done by the main component via a callback.
-    // Here we just record that a mapping was triggered. The main component
-    // will poll or subscribe to these events.
-    // For now, return the control ID and normalized value (0-127 → 0-1).
-    // This will be handled in pages/index.vue via a callback ref.
+  // ── Control dispatch ─────────────────────────────
+  const triggerControl = (controlId: string, rawValue: number) => {
+    if (controlId === 'transport_play') {
+      callbacks.onPlay()
+    } else if (controlId === 'transport_stop') {
+      callbacks.onStop()
+    } else {
+      // All other controls: delegate to caller (index.vue) with raw 0-127 value
+      callbacks.onCCMapped(controlId, rawValue)
+    }
   }
 
+  // ── Mapping management ───────────────────────────
   const recordMapping = (controlId: string, type: 'cc' | 'note', channel: number, number: number) => {
-    // Remove any existing mapping for this control
     const idx = state.mappings.findIndex(m => m.controlId === controlId)
-    if (idx >= 0) {
-      state.mappings.splice(idx, 1)
-    }
+    if (idx >= 0) state.mappings.splice(idx, 1)
     state.mappings.push({ controlId, type, channel, number })
+  }
+
+  const removeMapping = (controlId: string) => {
+    const idx = state.mappings.findIndex(m => m.controlId === controlId)
+    if (idx >= 0) state.mappings.splice(idx, 1)
   }
 
   const startLearn = (controlId: string) => {
@@ -218,31 +234,26 @@ export function useMidiIn() {
     state.learnControlId = null
   }
 
+  // ── Persistence ───────────────────────────────────
   const saveMappings = (): string => {
-    const data = {
+    return JSON.stringify({
       mappings: state.mappings,
-      transpose: state.transpose,
       syncMode: state.syncMode,
-    }
-    return JSON.stringify(data, null, 2)
+    }, null, 2)
   }
 
   const loadMappings = (json: string) => {
     try {
       const data = JSON.parse(json)
-      if (data.mappings && Array.isArray(data.mappings)) {
-        state.mappings = data.mappings
-      }
-      if (typeof data.transpose === 'number') {
-        state.transpose = data.transpose
-      }
-      if (data.syncMode) {
-        state.syncMode = data.syncMode
-      }
+      if (Array.isArray(data.mappings)) state.mappings = data.mappings
+      if (data.syncMode) state.syncMode = data.syncMode
     } catch (e) {
-      console.error('Failed to load mappings:', e)
+      console.error('Failed to load MIDI config:', e)
     }
   }
+
+  const getMappingFor = (controlId: string): MidiMapping | undefined =>
+    state.mappings.find(m => m.controlId === controlId)
 
   return {
     state,
@@ -250,7 +261,10 @@ export function useMidiIn() {
     selectInput,
     startLearn,
     cancelLearn,
+    removeMapping,
     saveMappings,
     loadMappings,
+    getMappingFor,
+    MAPPABLE_CONTROLS,
   }
 }
