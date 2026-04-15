@@ -115,20 +115,8 @@ watch(audioOn, (v) => { audioEnabledRef.current = v })
 const midi = useMidi()
 const MIDI_GATE_MS = 120
 
+// midiFireRef is wired AFTER midiIn so the closure can safely reference it.
 const midiFireRef: { current: ((id: number) => void) | null } = { current: null }
-midiFireRef.current = (id) => {
-  if (!midi.selectedId.value) return
-  const trk = tracksRaw.current[id]
-  if (!trk) return
-  const ch = trk.midiChannel
-  let note = trk.midiNote
-  // Apply transpose from MIDI IN
-  if (midiIn.state.transpose !== 0) {
-    note = Math.max(0, Math.min(127, note + midiIn.state.transpose))
-  }
-  midi.sendNoteOn(ch, note, 100)
-  setTimeout(() => midi.sendNoteOff(ch, note), MIDI_GATE_MS)
-}
 
 // ── MIDI IN ────────────────────────────────────────────
 const midiIn = useMidiIn({
@@ -185,6 +173,19 @@ watch(() => midiIn.state.syncBpm, (v) => {
 
 // Mapping panel visibility toggle
 const showMapping = ref(false)
+
+// Wire midiFireRef here — after midiIn is declared so the closure is clean.
+// Reads tracksRaw.current at call-time (not closure-capture), so ch/note are
+// always the latest values even after the user edits the CH/N inputs.
+midiFireRef.current = (id) => {
+  if (!midi.selectedId.value) return
+  const trk = tracksRaw.current[id]
+  if (!trk) return
+  const ch = trk.midiChannel          // 1-16, per-track
+  const note = trk.midiNote           // 0-127, per-track
+  midi.sendNoteOn(ch, note, 100)
+  setTimeout(() => midi.sendNoteOff(ch, note), MIDI_GATE_MS)
+}
 
 // Sync reactive → raw mirrors for the scheduler.
 watch(bpm, (v) => { bpmRaw.current = v })
