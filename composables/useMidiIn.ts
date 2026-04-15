@@ -25,20 +25,17 @@ export interface MidiMapping {
 
 // All controls available for MIDI mapping
 export const MAPPABLE_CONTROLS = [
-  { id: 'transport_play',  label: 'Play / Start' },
-  { id: 'transport_stop',  label: 'Stop' },
-  { id: 'bpm',             label: 'BPM (CC value × 2 + 40)' },
-  { id: 'masterN',         label: 'Master Numerator (CC / 127 × 16)' },
-  { id: 'masterD',         label: 'Master Denominator (cycles 4→8→16)' },
-  { id: 'master_apply',    label: 'Master Apply' },
-  { id: 'track0_mute',     label: 'Track 1 Mute (toggle)' },
-  { id: 'track1_mute',     label: 'Track 2 Mute (toggle)' },
-  { id: 'track2_mute',     label: 'Track 3 Mute (toggle)' },
-  { id: 'track3_mute',     label: 'Track 4 Mute (toggle)' },
-  { id: 'track4_mute',     label: 'Track 5 Mute (toggle)' },
-  { id: 'track5_mute',     label: 'Track 6 Mute (toggle)' },
-  { id: 'track6_mute',     label: 'Track 7 Mute (toggle)' },
-  { id: 'track7_mute',     label: 'Track 8 Mute (toggle)' },
+  { id: 'transport_play', label: 'Play / Start',           group: 'transport' },
+  { id: 'transport_stop', label: 'Stop',                   group: 'transport' },
+  { id: 'bpm',            label: 'BPM',                    group: 'transport' },
+  { id: 'masterN',        label: 'Master N',               group: 'master' },
+  { id: 'masterD',        label: 'Master D',               group: 'master' },
+  { id: 'master_apply',   label: 'Master Apply',           group: 'master' },
+  // Per-track N and D knobs (tracks 0-7)
+  ...Array.from({ length: 8 }, (_, i) => ([
+    { id: `track${i}_n`, label: `Track ${i + 1} N`, group: `track${i}` },
+    { id: `track${i}_d`, label: `Track ${i + 1} D`, group: `track${i}` },
+  ])).flat(),
 ] as const
 
 export type MappableControlId = typeof MAPPABLE_CONTROLS[number]['id']

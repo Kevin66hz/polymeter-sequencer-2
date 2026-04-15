@@ -135,20 +135,42 @@ const midiIn = useMidiIn({
   onPlay: () => { if (!playing.value) play() },
   onStop: () => { if (playing.value) stop() },
   onCCMapped: (controlId, rawValue) => {
+    // BPM: 0-127 → 40-294
     if (controlId === 'bpm') {
       bpm.value = Math.round(rawValue * 2 + 40)
-    } else if (controlId === 'masterN') {
+    }
+    // Master N: 0-127 → 0-16
+    else if (controlId === 'masterN') {
       masterNum.value = Math.round((rawValue / 127) * 16)
       onMasterKnobChange()
-    } else if (controlId === 'masterD' && rawValue > 63) {
+    }
+    // Master D: 0-127 split into 3 zones → 4 / 8 / 16
+    else if (controlId === 'masterD') {
       const opts = [4, 8, 16] as const
-      masterDen.value = opts[(opts.indexOf(masterDen.value as 4|8|16) + 1) % 3]
+      const zone = rawValue < 43 ? 0 : rawValue < 85 ? 1 : 2
+      masterDen.value = opts[zone]
       onMasterKnobChange()
-    } else if (controlId === 'master_apply' && rawValue > 63) {
+    }
+    // Master Apply
+    else if (controlId === 'master_apply' && rawValue > 63) {
       commitMaster()
-    } else if (controlId.startsWith('track') && controlId.endsWith('_mute') && rawValue > 63) {
-      const idx = parseInt(controlId.replace('track', '').replace('_mute', ''))
-      if (!isNaN(idx)) doMute(idx)
+    }
+    // Per-track N: track{i}_n → 0-127 → 0-16
+    else if (controlId.match(/^track\d+_n$/)) {
+      const idx = parseInt(controlId.replace('track', '').replace('_n', ''))
+      if (!isNaN(idx) && tracks.value[idx]) {
+        const [, d] = parseSig(tracks.value[idx].timeSig)
+        setTrackNum(idx, Math.round((rawValue / 127) * 16))
+      }
+    }
+    // Per-track D: track{i}_d → zone 0-2 → 4/8/16
+    else if (controlId.match(/^track\d+_d$/)) {
+      const idx = parseInt(controlId.replace('track', '').replace('_d', ''))
+      if (!isNaN(idx) && tracks.value[idx]) {
+        const opts = [4, 8, 16] as const
+        const zone = rawValue < 43 ? 0 : rawValue < 85 ? 1 : 2
+        setTrackDen(idx, opts[zone])
+      }
     }
   },
 })
@@ -412,6 +434,23 @@ const ROW_MAX = 22
 function gridMaxHeightPx(len: number): number {
   return Math.max(1, Math.ceil(len / 16)) * ROW_MAX
 }
+
+// ── Mapping overlay helpers ────────────────────────────
+function isLearning(id: string) {
+  return midiIn.state.learnControlId === id
+}
+function toggleLearn(id: string) {
+  if (isLearning(id)) midiIn.cancelLearn()
+  else midiIn.startLearn(id)
+}
+function bindingLabel(id: string): string {
+  const m = midiIn.getMappingFor(id)
+  if (!m) return '+'
+  return `${m.type.toUpperCase()}${m.number} ch${m.channel}`
+}
+function hasBound(id: string) {
+  return !!midiIn.getMappingFor(id)
+}
 </script>
 
 <template>
@@ -439,23 +478,25 @@ function gridMaxHeightPx(len: number): number {
            control). TRANSITION: knobs just stage — user must press APPLY
            to kick off the bridge, so sweeping through values doesn't fire
            a cascade of transitions. -->
-      <MeterKnob
-        v-model="masterNum"
-        :options="NUM_OPTS"
-        label="N"
-        :size="40"
-        color="#e5e5e5"
-        @change="onMasterKnobChange"
-      />
+      <!-- Master N knob with mapping overlay -->
+      <div class="relative z-[6]">
+        <MeterKnob v-model="masterNum" :options="NUM_OPTS" label="N" :size="40" color="#e5e5e5" @change="onMasterKnobChange" />
+        <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
+          :class="isLearning('masterN') ? 'bg-orange-500/70 animate-pulse' : hasBound('masterN') ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
+          @click="toggleLearn('masterN')" @click.right.prevent="midiIn.removeMapping('masterN')">
+          <span class="text-[7px] text-white font-mono leading-none text-center px-0.5">{{ isLearning('masterN') ? '●' : bindingLabel('masterN') }}</span>
+        </div>
+      </div>
       <span class="text-[18px] text-[#333] -mx-1">/</span>
-      <MeterKnob
-        v-model="masterDen"
-        :options="DEN_OPTS"
-        label="D"
-        :size="40"
-        color="#e5e5e5"
-        @change="onMasterKnobChange"
-      />
+      <!-- Master D knob with mapping overlay -->
+      <div class="relative z-[6]">
+        <MeterKnob v-model="masterDen" :options="DEN_OPTS" label="D" :size="40" color="#e5e5e5" @change="onMasterKnobChange" />
+        <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
+          :class="isLearning('masterD') ? 'bg-orange-500/70 animate-pulse' : hasBound('masterD') ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
+          @click="toggleLearn('masterD')" @click.right.prevent="midiIn.removeMapping('masterD')">
+          <span class="text-[7px] text-white font-mono leading-none text-center px-0.5">{{ isLearning('masterD') ? '●' : bindingLabel('masterD') }}</span>
+        </div>
+      </div>
 
       <!-- Master mode -->
       <div class="flex gap-0.5 rounded-sm overflow-hidden border border-[#222]">
@@ -504,24 +545,41 @@ function gridMaxHeightPx(len: number): number {
 
       <!-- ── RIGHT: Transport / audio / MIDI (pushed via ml-auto) ── -->
       <div class="ml-auto flex items-center gap-3 flex-wrap">
-        <button
-          class="border-0 px-[14px] py-[5px] text-[11px] cursor-pointer font-mono tracking-[2px]"
-          :class="playing ? 'bg-[#c03030] text-[#ffaaaa]' : 'bg-[#206020] text-[#aaffaa]'"
-          @click="playing ? stop() : play()"
-        >
-          {{ playing ? '■ STOP' : '▶ PLAY' }}
-        </button>
+        <!-- Play button with mapping overlay -->
+        <div class="relative z-[6]">
+          <button
+            class="border-0 px-[14px] py-[5px] text-[11px] cursor-pointer font-mono tracking-[2px]"
+            :class="playing ? 'bg-[#c03030] text-[#ffaaaa]' : 'bg-[#206020] text-[#aaffaa]'"
+            @click="playing ? stop() : play()"
+          >{{ playing ? '■ STOP' : '▶ PLAY' }}</button>
+          <div v-if="showMapping" class="absolute inset-0 flex gap-px">
+            <div class="flex-1 cursor-pointer flex items-center justify-center text-[7px] text-white font-mono"
+              :class="isLearning('transport_play') ? 'bg-orange-500/80 animate-pulse' : hasBound('transport_play') ? 'bg-blue-500/50' : 'bg-white/10 hover:bg-white/25'"
+              @click="toggleLearn('transport_play')">{{ isLearning('transport_play') ? '●' : bindingLabel('transport_play') || '▶' }}</div>
+            <div class="flex-1 cursor-pointer flex items-center justify-center text-[7px] text-white font-mono"
+              :class="isLearning('transport_stop') ? 'bg-orange-500/80 animate-pulse' : hasBound('transport_stop') ? 'bg-blue-500/50' : 'bg-white/10 hover:bg-white/25'"
+              @click="toggleLearn('transport_stop')">{{ isLearning('transport_stop') ? '●' : bindingLabel('transport_stop') || '■' }}</div>
+          </div>
+        </div>
 
-        <div class="flex items-center gap-1.5">
+        <!-- BPM with mapping overlay -->
+        <div class="flex items-center gap-1.5 relative z-[6]">
           <span class="text-[10px] text-[#444]">BPM</span>
-          <input
-            type="range"
-            min="40"
-            max="240"
-            :value="bpm"
-            class="w-[90px]"
-            @input="(e) => (bpm = Number((e.target as HTMLInputElement).value))"
-          />
+          <div class="relative">
+            <input
+              type="range"
+              min="40"
+              max="240"
+              :value="bpm"
+              class="w-[90px]"
+              @input="(e) => (bpm = Number((e.target as HTMLInputElement).value))"
+            />
+            <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center"
+              :class="isLearning('bpm') ? 'bg-orange-500/70 animate-pulse' : hasBound('bpm') ? 'bg-blue-500/30' : 'bg-white/10 hover:bg-white/20'"
+              @click="toggleLearn('bpm')">
+              <span class="text-[7px] text-white font-mono">{{ isLearning('bpm') ? '●' : bindingLabel('bpm') || 'BPM' }}</span>
+            </div>
+          </div>
           <span class="text-[11px] min-w-[28px]">{{ bpm }}</span>
         </div>
 
@@ -604,46 +662,12 @@ function gridMaxHeightPx(len: number): number {
       </div>
     </div>
 
-    <!-- MIDI Mapping panel — collapsible, shown when MAPPING button active -->
+    <!-- Mapping overlay dimming layer — sits under the chip overlays on each control -->
     <div
-      v-if="showMapping && midiIn.state.selectedId"
-      class="mb-2 p-2 border border-[#1e1e1e] bg-[#0c0c0c] flex flex-wrap gap-2"
-    >
-      <div
-        v-for="ctrl in MAPPABLE_CONTROLS"
-        :key="ctrl.id"
-        class="flex items-center gap-1.5 border border-[#1a1a1a] px-2 py-1 rounded-sm min-w-0"
-      >
-        <span class="text-[9px] text-[#555] w-[120px] truncate">{{ ctrl.label }}</span>
-        <!-- Current binding display -->
-        <span class="text-[9px] font-mono min-w-[70px]">
-          <template v-if="midiIn.getMappingFor(ctrl.id)">
-            <span class="text-[#8faacc]">
-              {{ midiIn.getMappingFor(ctrl.id)!.type.toUpperCase() }}
-              {{ midiIn.getMappingFor(ctrl.id)!.number }}
-              <span class="text-[#444]">ch{{ midiIn.getMappingFor(ctrl.id)!.channel }}</span>
-            </span>
-          </template>
-          <span v-else class="text-[#333]">—</span>
-        </span>
-        <!-- Learn button -->
-        <button
-          class="text-[9px] px-1.5 py-0.5 font-mono border rounded-sm"
-          :class="midiIn.state.learnControlId === ctrl.id
-            ? 'bg-[#ff6600] text-white border-[#ff6600] animate-pulse'
-            : 'bg-transparent text-[#555] border-[#222] hover:text-[#ccc]'"
-          @click="midiIn.state.learnControlId === ctrl.id
-            ? midiIn.cancelLearn()
-            : midiIn.startLearn(ctrl.id)"
-        >{{ midiIn.state.learnControlId === ctrl.id ? '● WAIT' : 'LEARN' }}</button>
-        <!-- Clear binding -->
-        <button
-          v-if="midiIn.getMappingFor(ctrl.id)"
-          class="text-[9px] px-1 py-0.5 font-mono border border-[#222] bg-transparent text-[#555] rounded-sm hover:text-[#c66]"
-          @click="midiIn.removeMapping(ctrl.id)"
-        >✕</button>
-      </div>
-    </div>
+      v-if="showMapping"
+      class="fixed inset-0 z-[5] pointer-events-none"
+      style="background: rgba(0,0,0,0.55)"
+    />
 
     <!-- Tracks: fill the remaining viewport height. The 8 rows share the
          vertical space via flex-1, so each track row is ~(screenH - header)/8
@@ -670,23 +694,27 @@ function gridMaxHeightPx(len: number): number {
           :style="{ color: trk.color }"
         >{{ trk.name }}</span>
 
-        <!-- Numerator / Denominator knobs (smaller to save height) -->
-        <div class="relative flex items-end gap-0">
-          <MeterKnob
-            :model-value="trkNum(trk)"
-            :options="NUM_OPTS"
-            :size="36"
-            :color="trk.color"
-            @change="(v) => setTrackNum(trk.id, v)"
-          />
+        <!-- Numerator / Denominator knobs with mapping overlay -->
+        <div class="relative flex items-end gap-0 z-[6]">
+          <!-- N knob -->
+          <div class="relative">
+            <MeterKnob :model-value="trkNum(trk)" :options="NUM_OPTS" :size="36" :color="trk.color" @change="(v) => setTrackNum(trk.id, v)" />
+            <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
+              :class="isLearning(`track${i}_n`) ? 'bg-orange-500/70 animate-pulse' : hasBound(`track${i}_n`) ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
+              @click="toggleLearn(`track${i}_n`)" @click.right.prevent="midiIn.removeMapping(`track${i}_n`)">
+              <span class="text-[6px] text-white font-mono leading-none">{{ isLearning(`track${i}_n`) ? '●' : bindingLabel(`track${i}_n`) }}</span>
+            </div>
+          </div>
           <span class="text-[12px] text-[#333] pb-3">/</span>
-          <MeterKnob
-            :model-value="trkDen(trk)"
-            :options="DEN_OPTS"
-            :size="36"
-            :color="trk.color"
-            @change="(v) => setTrackDen(trk.id, v)"
-          />
+          <!-- D knob -->
+          <div class="relative">
+            <MeterKnob :model-value="trkDen(trk)" :options="DEN_OPTS" :size="36" :color="trk.color" @change="(v) => setTrackDen(trk.id, v)" />
+            <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
+              :class="isLearning(`track${i}_d`) ? 'bg-orange-500/70 animate-pulse' : hasBound(`track${i}_d`) ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
+              @click="toggleLearn(`track${i}_d`)" @click.right.prevent="midiIn.removeMapping(`track${i}_d`)">
+              <span class="text-[6px] text-white font-mono leading-none">{{ isLearning(`track${i}_d`) ? '●' : bindingLabel(`track${i}_d`) }}</span>
+            </div>
+          </div>
           <span
             v-if="pendingSig(i)"
             class="absolute -top-[1px] -right-[4px] w-[6px] h-[6px] rounded-full bg-[#ff6600] pointer-events-none"
