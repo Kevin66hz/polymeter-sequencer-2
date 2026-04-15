@@ -1,6 +1,6 @@
-# polymeter-sequencer
+# IBK-1 — Polymeter Sequencer
 
-Nuxt 3 + Tailwind CSS v3 製の 8 トラック・ポリメトリック・ステップシーケンサー。
+Nuxt 3 + Tailwind CSS v3 製の 16 トラック・ポリメトリック・ステップシーケンサー。
 各トラックが独立した拍子（4/4, 7/8, 9/8 …）を持ち、ループ末尾で拍子変更を
 反映する。音声は Web Audio API の look-ahead スケジューラ（lookahead 100ms /
 tick 25ms）でサンプル精度で再生。
@@ -67,3 +67,12 @@ polymeter-sequencer/
 - 16 列 CSS グリッド、ステップ数が 16 を超えたら自然に折り返し
 - Mute / Solo / Clear
 - Web MIDI は `composables/useMidi.ts` のスタブに分離、実装は追って
+
+---
+
+<!-- I -->
+<!-- B -->
+<!-- K -->
+
+*Inspiration By Kensei — [DJ KENSEI](https://www.djkensei.com/)*  
+*Im Bin Kevin — Bin Ke Vin*

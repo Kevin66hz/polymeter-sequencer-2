@@ -63,7 +63,7 @@
       <text :x="CX" :y="CY - 5" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? '#fff' : '#888'"
-        font-size="9" font-family="monospace" font-weight="bold">{{ track.name }}</text>
+        font-size="9" font-family="monospace" font-weight="bold">{{ audioOn ? track.name : track.midiChannel }}</text>
       <text :x="CX" :y="CY + 7" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? track.color : '#444'"
@@ -80,6 +80,7 @@ const props = defineProps<{
   track: Track
   head: number
   selected: boolean
+  audioOn: boolean
 }>()
 
 defineEmits<{

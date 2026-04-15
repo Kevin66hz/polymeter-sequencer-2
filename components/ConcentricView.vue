@@ -84,8 +84,23 @@
           :font-size="selectedId === ti ? 8 : 7"
           font-family="monospace"
           font-weight="bold"
-        >{{ trk.name }}</text>
+        >{{ audioOn ? trk.name : trk.midiChannel }}</text>
       </g>
+
+      <!-- 開発中 全面オーバーレイ -->
+      <rect x="0" y="0" :width="SIZE" :height="SIZE" fill="rgba(60,40,0,0.18)" class="pointer-events-none" />
+      <text
+        :x="CX" :y="CY + 80"
+        text-anchor="middle" dominant-baseline="middle"
+        fill="#886622" font-size="13" font-family="monospace" letter-spacing="4"
+        opacity="0.35" class="pointer-events-none"
+      >[ 開発中 / WORK IN PROGRESS ]</text>
+      <text
+        :x="CX" :y="16"
+        text-anchor="middle" dominant-baseline="hanging"
+        fill="#886622" font-size="8" font-family="monospace"
+        opacity="0.6" class="pointer-events-none"
+      >[ 開発中 ]</text>
 
       <!-- Center info -->
       <circle :cx="CX" :cy="CY" :r="CENTER_R - 2" fill="#111220" />
@@ -94,7 +109,7 @@
         text-anchor="middle" dominant-baseline="middle"
         fill="#ffffff" font-size="11" font-family="monospace" font-weight="bold"
         class="pointer-events-none"
-      >{{ selectedTrack?.name ?? '' }}</text>
+      >{{ audioOn ? (selectedTrack?.name ?? '') : (selectedTrack ? String(selectedTrack.midiChannel) : '') }}</text>
       <text
         :x="CX" :y="CY + 6"
         text-anchor="middle" dominant-baseline="middle"
@@ -117,11 +132,12 @@
 import { computed } from 'vue'
 import type { Track } from '~/composables/useScheduler'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   tracks: Track[]
   heads: number[]
   selectedId: number
-}>()
+  audioOn: boolean
+}>(), { audioOn: true })
 
 defineEmits<{
   select: [trackId: number]

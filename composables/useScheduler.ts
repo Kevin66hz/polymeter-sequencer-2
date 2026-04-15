@@ -147,6 +147,81 @@ export const generateBridge = (
   return out
 }
 
+// ── Web Audio 合成音 ─────────────────────────────────────
+// 16トラック分の音色。audioEnabledRef.current が false のときは呼ばれない。
+// MIDI 送信とは独立して動作する。
+export function triggerSound(ctx: AudioContext, id: number) {
+  const t = ctx.currentTime + 0.002
+  const master = ctx.createGain()
+  master.connect(ctx.destination)
+
+  const noise = (dur: number) => {
+    const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate)
+    const d = buf.getChannelData(0)
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1
+    const s = ctx.createBufferSource(); s.buffer = buf; return s
+  }
+
+  // トラックを大まかなカテゴリに分類してそれぞれ合成
+  const cat = id % 8  // 0–7 の音色カテゴリを 8 トラックごとに繰り返す
+  const pitch = id < 8 ? 1.0 : 0.85  // ch9–16 は少し低め
+
+  if (cat === 0) {
+    // KICK: サイン波スイープ
+    const o = ctx.createOscillator(); o.connect(master)
+    o.frequency.setValueAtTime(160 * pitch, t)
+    o.frequency.exponentialRampToValueAtTime(0.01, t + 0.28)
+    master.gain.setValueAtTime(1.0, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.28)
+    o.start(t); o.stop(t + 0.28)
+  } else if (cat === 1) {
+    // SNARE: ノイズ + トーン
+    const s = noise(0.18)
+    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1200
+    const o = ctx.createOscillator(); o.frequency.value = 180 * pitch
+    const og = ctx.createGain()
+    s.connect(f); f.connect(master); o.connect(og); og.connect(master)
+    master.gain.setValueAtTime(0.7, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.18)
+    og.gain.setValueAtTime(0.4, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.08)
+    s.start(t); s.stop(t + 0.18); o.start(t); o.stop(t + 0.08)
+  } else if (cat === 2) {
+    // HAT: ハイパスノイズ（短）
+    const s = noise(0.06)
+    const f = ctx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 8000
+    s.connect(f); f.connect(master)
+    master.gain.setValueAtTime(0.45, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.06)
+    s.start(t); s.stop(t + 0.06)
+  } else if (cat === 3) {
+    // CLAP: バンドパスノイズ
+    const s = noise(0.12)
+    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1500; f.Q.value = 0.5
+    s.connect(f); f.connect(master)
+    master.gain.setValueAtTime(0.55, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.12)
+    s.start(t); s.stop(t + 0.12)
+  } else if (cat === 4) {
+    // BASS: 低サイン波
+    const o = ctx.createOscillator(); o.frequency.value = 55 * pitch; o.connect(master)
+    master.gain.setValueAtTime(0.5, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.25)
+    o.start(t); o.stop(t + 0.25)
+  } else if (cat === 5) {
+    // LEAD: ノコギリ波
+    const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 440 * pitch; o.connect(master)
+    master.gain.setValueAtTime(0.35, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.12)
+    o.start(t); o.stop(t + 0.12)
+  } else if (cat === 6) {
+    // PAD: 三角波（柔らか）
+    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = 220 * pitch; o.connect(master)
+    master.gain.setValueAtTime(0.3, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.4)
+    o.start(t); o.stop(t + 0.4)
+  } else {
+    // PERC: ミッドノイズ（短）
+    const s = noise(0.08)
+    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 600; f.Q.value = 2
+    s.connect(f); f.connect(master)
+    master.gain.setValueAtTime(0.5, t); master.gain.exponentialRampToValueAtTime(0.001, t + 0.08)
+    s.start(t); s.stop(t + 0.08)
+  }
+}
+
 // ── スケジューラ本体 ─────────────────────────────────────
 export type SchedulerDeps = {
   bpmRaw: { current: number }
@@ -155,6 +230,8 @@ export type SchedulerDeps = {
   displayHeads: { current: number[] }
   applyFnRef: { current: ((id: number, p: Pending) => void) | null }
   midiFireRef: { current: ((id: number) => void) | null }
+  // audioEnabledRef.current === false でWeb Audio 合成音を消音。MIDIは継続。
+  audioEnabledRef: { current: boolean }
   masterTargetRef: { current: string | null }
   onHeadsTick: (heads: number[]) => void
   onMasterReset: () => void
@@ -163,12 +240,11 @@ export type SchedulerDeps = {
 export function createScheduler(deps: SchedulerDeps) {
   const {
     bpmRaw, tracksRaw, pendingRaw, displayHeads,
-    applyFnRef, midiFireRef,
+    applyFnRef, midiFireRef, audioEnabledRef,
     masterTargetRef, onHeadsTick, onMasterReset,
   } = deps
 
-  // Minimal AudioContext used only for timing reference (currentTime).
-  // No audio nodes are created — this is a MIDI-only sequencer.
+  // AudioContext: タイミング基準 + Web Audio 合成音の両方に使用
   let ctx: AudioContext | null = null
   let intervalId: ReturnType<typeof setInterval> | null = null
   let rafId: number | null = null
@@ -186,6 +262,7 @@ export function createScheduler(deps: SchedulerDeps) {
       if (!running) return
       displayHeads.current[id] = si
       if (ok) {
+        if (audioEnabledRef.current && ctx) triggerSound(ctx, id)
         midiFireRef.current?.(id)
       }
     }, ms)

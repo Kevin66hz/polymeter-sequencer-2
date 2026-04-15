@@ -101,14 +101,10 @@ const heads = ref<number[]>(Array(TRACK_COUNT).fill(-1))
 const pendQ = ref<Pending[][]>(Array.from({ length: TRACK_COUNT }, () => []))
 const selectedId = ref(0)
 const detailId = ref<number | null>(null)
-const trackEnabled = ref<boolean[]>(Array(TRACK_COUNT).fill(true))
-const trackEnabledRaw = { current: Array(TRACK_COUNT).fill(true) as boolean[] }
-
-watch(trackEnabled, v => { trackEnabledRaw.current = v.slice() }, { deep: true })
-
-function toggleTrackEnabled(id: number) {
-  trackEnabled.value = trackEnabled.value.map((v, i) => i === id ? !v : v)
-}
+// ── グローバル Audio ON/OFF (Web Audio 合成音。MIDIは常時送信) ──
+const audioOn = ref(true)
+const audioEnabledRef = { current: true }
+watch(audioOn, v => { audioEnabledRef.current = v })
 const detTrk = () => detailId.value !== null ? (tracks.value[detailId.value] ?? null) : null
 
 const masterNum = ref(4)
@@ -206,7 +202,6 @@ const showMapping = ref(false)
 
 midiFireRef.current = (id) => {
   if (!midi.selectedId.value) return
-  if (!trackEnabledRaw.current[id]) return  // Audio/MIDI off
   const trk = tracksRaw.current[id]; if (!trk) return
   midi.sendNoteOn(trk.midiChannel, trk.midiNote, trk.midiVelocity ?? 100)
   setTimeout(() => midi.sendNoteOff(trk.midiChannel, trk.midiNote), trk.gateMs ?? 80)
@@ -238,7 +233,7 @@ onMounted(async () => {
   await midiIn.init()
   scheduler = createScheduler({
     bpmRaw, tracksRaw, pendingRaw, displayHeads,
-    applyFnRef, midiFireRef, masterTargetRef,
+    applyFnRef, midiFireRef, audioEnabledRef, masterTargetRef,
     onHeadsTick: h => { heads.value = h },
     onMasterReset: () => handleMasterReset(),
   })
@@ -444,10 +439,13 @@ function onMidiConfigLoaded(e: Event) {
           <div class="w-px self-stretch bg-[#222] my-0.5 flex-shrink-0" />
 
           <!-- ALL MUTE -->
-          <button
-            class="text-[10px] px-2 py-[4px] border rounded-sm tracking-[1px] flex-shrink-0"
-            :class="allMuted ? 'bg-[#2a1a1a] text-[#dd8888] border-[#664444]' : 'bg-transparent text-[#555] border-[#222] hover:text-[#aaa]'"
-            @click="toggleAllMute">⊘ ALL M</button>
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class="text-[9px] text-[#444] tracking-[1px]">MUTE</span>
+            <button
+              class="text-[10px] px-2 py-[4px] border rounded-sm tracking-[1px]"
+              :class="allMuted ? 'bg-[#2a1a1a] text-[#dd8888] border-[#664444]' : 'bg-transparent text-[#555] border-[#222] hover:text-[#aaa]'"
+              @click="toggleAllMute">⊘ ALL M</button>
+          </div>
 
           <!-- ml-auto: 右寄せ -->
           <div class="ml-auto flex items-center gap-2 flex-shrink-0">
@@ -480,6 +478,17 @@ function onMidiConfigLoaded(e: Event) {
                 <button class="text-[11px] text-[#555] hover:text-[#ccc] leading-none" @click="showBpmOverlay=false">✕</button>
               </div>
             </div>
+
+            <!-- AUDIO ON/OFF (グローバル) -->
+            <button
+              class="border px-[8px] py-[4px] text-[11px] tracking-[1px] rounded-sm flex-shrink-0"
+              :class="audioOn
+                ? 'bg-[#1a2a1a] text-[#8fd08f] border-[#2f5f2f]'
+                : 'bg-[#222] text-[#666] border-[#333]'"
+              :title="audioOn ? 'MIDI ON — click to silence' : 'MIDI OFF — click to send'"
+              @click="audioOn = !audioOn">
+              {{ audioOn ? '♪ AUDIO' : '✕ AUDIO' }}
+            </button>
 
             <!-- PLAY / STOP -->
             <div class="relative z-[6] flex-shrink-0">
@@ -575,16 +584,22 @@ function onMidiConfigLoaded(e: Event) {
       <div v-if="viewMode==='grid'" class="flex-1 min-h-0 p-2">
         <div class="grid grid-cols-8 grid-rows-2 gap-2 h-full">
           <div v-for="trk in tracks" :key="trk.id"
-            class="bg-[#0e0e0e] border flex flex-col min-h-0 px-1.5 py-1 gap-1"
-            :style="{ borderColor: pendQ[trk.id].length ? trk.color+'44' : '#161616' }"
-            :class="{ 'opacity-40': trk.mute }">
+            class="border flex flex-col min-h-0 px-1.5 py-1 gap-1 transition-all"
+            :style="{
+              borderColor: trk.solo ? trk.color+'99' : pendQ[trk.id].length ? trk.color+'44' : '#161616',
+              background: trk.solo ? '#1c1a10' : '#0e0e0e',
+              boxShadow: trk.solo ? ('0 0 8px 2px ' + trk.color + '44') : 'none',
+            }"
+            :class="{
+              'opacity-30': trk.mute,
+              'opacity-30': tracks.some(t=>t.solo) && !trk.solo && !trk.mute,
+            }">
 
             <!-- Top row: name + knobs (size 28) -->
             <div class="flex items-center justify-between flex-shrink-0">
-              <!-- OFF時はMIDIチャンネル番号を表示 -->
               <span class="text-[8px] tracking-[1px] font-semibold truncate"
-                :style="{ color: trk.color, opacity: trackEnabled[trk.id] ? 1 : 0.45 }">
-                {{ trackEnabled[trk.id] ? trk.name : trk.midiChannel }}</span>
+                :style="{ color: trk.color }">
+                {{ audioOn ? trk.name : trk.midiChannel }}</span>
               <div class="flex items-center gap-0.5 relative">
                 <MeterKnob :model-value="trkNum(trk)" :options="NUM_OPTS" :size="28" :color="trk.color" @change="(v) => setTrackNum(trk.id, v)" />
                 <span class="text-[9px] text-[#333]">/</span>
@@ -597,6 +612,7 @@ function onMidiConfigLoaded(e: Event) {
             <div class="flex-1 min-h-0 min-w-0 flex justify-center items-center overflow-hidden">
               <CircularTrack
                 :track="trk" :head="heads[trk.id]" :selected="selectedId === trk.id"
+                :audio-on="audioOn"
                 @select="selectedId = trk.id"
                 @toggle="(si) => tog(trk.id, si)" />
             </div>
@@ -630,6 +646,7 @@ function onMidiConfigLoaded(e: Event) {
         <div class="flex-1 overflow-y-auto flex justify-center items-start p-3">
           <ConcentricView
             :tracks="tracks" :heads="heads" :selected-id="selectedId"
+            :audio-on="audioOn"
             @select="selectedId = $event"
             @toggle="(ti, si) => tog(ti, si)" />
         </div>
@@ -730,21 +747,12 @@ function onMidiConfigLoaded(e: Event) {
           style="height:32px">
           <!-- カラードット -->
           <div class="w-2 h-2 rounded-full flex-shrink-0" :style="{ background: detTrk()!.color }"></div>
-          <!-- トラック名（OFF時はMIDIチャンネル番号） -->
+          <!-- トラック名 -->
           <span class="text-[12px] font-semibold tracking-[1px] min-w-[40px]"
             :style="{ color: detTrk()!.color }">
-            {{ trackEnabled[detailId!] ? detTrk()!.name : detTrk()!.midiChannel }}
+            {{ detTrk()!.name }}
           </span>
           <span class="text-[10px] text-[#555]">{{ detTrk()!.timeSig }}</span>
-          <!-- Audio On/Off -->
-          <button
-            class="text-[9px] px-2 py-[2px] border rounded-sm tracking-[1px]"
-            :class="trackEnabled[detailId!]
-              ? 'bg-[#182818] text-[#88cc88] border-[#336633]'
-              : 'bg-transparent text-[#555] border-[#333]'"
-            @click="toggleTrackEnabled(detailId!)">
-            {{ trackEnabled[detailId!] ? 'ON' : 'OFF' }}
-          </button>
           <!-- pending indicator -->
           <span v-if="pendQ[detailId!]?.length" class="text-[9px] text-[#ff9944]">
             {{ pendQ[detailId!].length }} queued →
@@ -851,6 +859,9 @@ function onMidiConfigLoaded(e: Event) {
 
 /* Range sliders: グレー系 */
 input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
   accent-color: #666;
   cursor: pointer;
 }
@@ -860,13 +871,14 @@ input[type=range]::-webkit-slider-runnable-track {
   border-radius: 2px;
 }
 input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
   background: #888;
   border: none;
   width: 10px;
   height: 10px;
   border-radius: 50%;
   margin-top: -3.5px;
-  -webkit-appearance: none;
 }
 input[type=range]::-moz-range-track {
   background: #2a2a2a;
