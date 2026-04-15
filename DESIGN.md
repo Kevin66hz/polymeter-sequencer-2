@@ -149,7 +149,42 @@ interface Track {
 | `ROW_MAX` | 22px | `pages/index.vue` |
 | Density threshold | 0.5 | `useScheduler.ts` (`deriveStepsFromSource`) |
 
-## 9. 既知の制約
+## 9. MIDI IN — Transpose / Sync / Mapping
+
+外部 MIDI キーボード・コントローラからの入力。3つの機能を持つ：
+
+### Transpose（移調）
+グローバルな **semitone オフセット**。ベースノート C4 (= MIDI note 60) を基準に、そこからの差分を保持する。全トラックの MIDI note output に加算される。
+- MIDI ノートを受信 → note - 60 = offset に設定。
+- 例：D4 (62) を弾く → offset = +2 (全ノートが2半音高くなる)。
+- Mapping に登録されていないノートは自動的に transpose を設定する。
+
+### MIDI Clock Sync（テンポ同期）
+外部 MIDI クロック（0xF8、24 PPQN）に従う。SYNC モード有効時：
+- 受信した clock pulse を数え、`6 pulses = 1 sixteenth-note` で計算。
+- BPM を clock interval から推定し `bpmRaw` を更新。
+- 0xFA (Start) / 0xFC (Stop) で再生制御可（将来実装）。
+
+### Mapping（CC / Note → Control）
+外部コントローラのボタン / つまみを任意の内部コントロール（BPM、Master N/D、各トラック設定など）に割り当てる。
+
+**Learn mode**: SAVE CFG / LOAD CFG 横の「LEARN」ボタンを押す → "waiting for MIDI..." → CC/note を受信すると自動記録。
+
+**保存形式**:
+```json
+{
+  "mappings": [
+    { "controlId": "tempo", "type": "cc", "channel": 1, "number": 7 },
+    { "controlId": "masterN", "type": "note", "channel": 1, "number": 60 }
+  ],
+  "transpose": 0,
+  "syncMode": "internal"
+}
+```
+
+**Persistent**: ダウンロード / ロード機能で JSON ファイルとして保存・復元可能。
+
+## 10. 既知の制約
 
 - MIDI OUT は Web MIDI API 対応ブラウザ限定（Chromium 系）。
 - AudioContext はユーザー・ジェスチャ後にのみ作成・再開される。

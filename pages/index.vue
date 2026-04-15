@@ -10,6 +10,7 @@ import {
   type Track,
 } from '~/composables/useScheduler'
 import { useMidi } from '~/composables/useMidi'
+import { useMidiIn } from '~/composables/useMidiIn'
 import MeterKnob from '~/components/MeterKnob.vue'
 
 // ── Meter vocabulary ───────────────────────────────────
@@ -110,7 +111,7 @@ const audioOn = ref(true)
 const audioEnabledRef = { current: audioOn.value }
 watch(audioOn, (v) => { audioEnabledRef.current = v })
 
-// ── MIDI ───────────────────────────────────────────────
+// ── MIDI OUT ───────────────────────────────────────────
 const midi = useMidi()
 const MIDI_GATE_MS = 120
 
@@ -120,10 +121,25 @@ midiFireRef.current = (id) => {
   const trk = tracksRaw.current[id]
   if (!trk) return
   const ch = trk.midiChannel
-  const note = trk.midiNote
+  let note = trk.midiNote
+  // Apply transpose from MIDI IN
+  if (midiIn.state.transpose !== 0) {
+    note = Math.max(0, Math.min(127, note + midiIn.state.transpose))
+  }
   midi.sendNoteOn(ch, note, 100)
   setTimeout(() => midi.sendNoteOff(ch, note), MIDI_GATE_MS)
 }
+
+// ── MIDI IN ────────────────────────────────────────────
+const midiIn = useMidiIn()
+
+// For external clock sync: override bpmRaw when syncBpm is active
+watch(() => midiIn.state.syncBpm, (v) => {
+  if (midiIn.state.syncMode === 'external' && v) {
+    bpmRaw.current = v
+    bpm.value = v
+  }
+})
 
 // Sync reactive → raw mirrors for the scheduler.
 watch(bpm, (v) => { bpmRaw.current = v })
@@ -164,7 +180,10 @@ function handleMasterReset() {
   masterTarget.value = null
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Init MIDI IN (note receive, transpose, sync)
+  await midiIn.init()
+
   scheduler = createScheduler({
     bpmRaw,
     tracksRaw,
@@ -319,6 +338,37 @@ function onMidiSelect(e: Event) {
   midi.selectOutput(v || null)
 }
 
+// ── MIDI Config (Save / Load) ──────────────────────────
+const midiConfigInput = ref<HTMLInputElement | null>(null)
+
+function downloadMidiConfig() {
+  const json = midiIn.saveMappings()
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'midi-config.json'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function triggerLoadMidiConfig() {
+  midiConfigInput.value?.click()
+}
+
+function onMidiConfigLoaded(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (evt) => {
+    const text = evt.target?.result as string
+    midiIn.loadMappings(text)
+  }
+  reader.readAsText(file)
+  input.value = '' // reset for next load
+}
+
 // Helpers for template readability
 function trkNum(t: Track) { return parseSig(t.timeSig)[0] }
 function trkDen(t: Track) { return parseSig(t.timeSig)[1] }
@@ -464,7 +514,7 @@ function gridMaxHeightPx(len: number): number {
         </button>
 
         <div class="flex items-center gap-1.5">
-          <span class="text-[10px] text-[#444]">MIDI</span>
+          <span class="text-[10px] text-[#444]">MIDI OUT</span>
           <select
             :value="midi.selectedId.value ?? ''"
             class="bg-[#111] text-[#ccc] border border-[#222] text-[11px] py-[2px] px-[5px] min-w-[140px]"
@@ -476,6 +526,60 @@ function gridMaxHeightPx(len: number): number {
             </option>
             <option v-for="o in midi.outputs.value" :key="o.id" :value="o.id">{{ o.name }}</option>
           </select>
+        </div>
+
+        <!-- MIDI IN -->
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-[#444]">MIDI IN</span>
+          <select
+            v-if="midiIn.state.supported"
+            :value="midiIn.state.selectedId ?? ''"
+            class="bg-[#111] text-[#ccc] border border-[#222] text-[11px] py-[2px] px-[5px] min-w-[140px]"
+            @change="(e) => midiIn.selectInput((e.target as HTMLSelectElement).value || null)"
+          >
+            <option value="">— none —</option>
+            <option v-for="o in midiIn.state.inputs" :key="o.id" :value="o.id">{{ o.name }}</option>
+          </select>
+          <span v-else class="text-[10px] text-[#666]">unsupported</span>
+        </div>
+
+        <!-- Transpose display -->
+        <div class="flex items-center gap-1.5" v-if="midiIn.state.selectedId">
+          <span class="text-[10px] text-[#444]">TRANS</span>
+          <span class="text-[11px] min-w-[24px]">{{ midiIn.state.transpose > 0 ? '+' : '' }}{{ midiIn.state.transpose }}</span>
+        </div>
+
+        <!-- Sync mode -->
+        <div class="flex items-center gap-0.5 rounded-sm overflow-hidden border border-[#222]" v-if="midiIn.state.selectedId">
+          <button
+            class="text-[9px] px-1.5 py-1 font-mono"
+            :class="midiIn.state.syncMode === 'internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555]'"
+            @click="midiIn.state.syncMode = 'internal'"
+          >INT</button>
+          <button
+            class="text-[9px] px-1.5 py-1 font-mono"
+            :class="midiIn.state.syncMode === 'external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555]'"
+            @click="midiIn.state.syncMode = 'external'"
+          >SYNC</button>
+        </div>
+
+        <!-- Mapping: download / load config -->
+        <div class="flex items-center gap-1" v-if="midiIn.state.selectedId">
+          <button
+            class="text-[9px] px-2 py-1 font-mono border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
+            @click="downloadMidiConfig"
+          >SAVE CFG</button>
+          <button
+            class="text-[9px] px-2 py-1 font-mono border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
+            @click="triggerLoadMidiConfig"
+          >LOAD CFG</button>
+          <input
+            ref="midiConfigInput"
+            type="file"
+            accept=".json"
+            style="display: none"
+            @change="onMidiConfigLoaded"
+          />
         </div>
       </div>
     </div>
