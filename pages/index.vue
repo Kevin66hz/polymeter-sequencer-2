@@ -382,7 +382,7 @@ function onMidiConfigLoaded(e: Event) {
       <!-- ═══ 左: 機種名 + 変拍子ツマミ (全高スパン・メイン強調) ═══ -->
       <div class="flex items-center gap-1.5 px-4 border-r border-[#1e1e1e] flex-shrink-0">
         <div class="flex flex-col items-start mr-2 flex-shrink-0">
-          <span class="text-[11px] tracking-[3px] text-[#666] font-bold leading-none">IBK-1</span>
+          <img src="/ibk.svg" alt="IBK" class="h-[14px] w-auto block opacity-40 pointer-events-none select-none" />
           <span class="text-[7px] tracking-[1px] text-[#333] leading-none mt-[3px]">POLY SEQ</span>
         </div>
         <span class="text-[9px] tracking-[2px] text-[#444] mr-1">MASTER</span>
