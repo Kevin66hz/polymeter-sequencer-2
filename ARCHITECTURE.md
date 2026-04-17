@@ -36,6 +36,32 @@
 
 それ以外は共通。
 
+### Plus の責務境界（重要）
+
+**Plus は "グラフィック / ビジュアル表現のアップグレード" に責務を限定する。**
+コア機能の分岐先ではない。「Plus にも入れないと無印に影響が出る」と感じた時点で、
+それは Plus 側ではなく layers/core に入れるべき修正である。
+
+Plus 側に**書いてよいもの**:
+
+- RING / GRID の描画実装（SVG 多層化、Canvas オーバーレイ、パーティクル、残像、グロウ）
+- 既存機能・既存プラグインの**ビジュアル表示**（NOTE リピートの連打可視化など）
+- Plus 限定プラグインの登録セット（重い描画を伴う拡張の有効化など）
+- ブランディング・テーマ差分
+
+Plus 側に**書いてはいけないもの（＝ layers/core に入れるべき）**:
+
+- MIDI I/O のロジック（mapping、clock sync、learn、transpose 等の挙動変更）
+- スケジューラ本体（`createScheduler`）の修正
+- 拍子計算・ブリッジ生成・Pending 適用などの pure 関数
+- プラグイン API の契約（`SequencerPlugin` 型、スケジューラのフック仕様）
+- ストア（`useSequencerStore`）の挙動・公開インターフェイス
+- オーディオ / MIDI アダプタの interface 変更
+
+**コアのバグ修正・機能追加は layers/core に直接コミット**し、両アプリがそれを
+参照する形で一元化する。Plus 側のブランチでコア修正をするのは禁止（アーキテクチャ
+違反）。
+
 ## 3. ディレクトリ構造
 
 ```
@@ -277,7 +303,88 @@ Vercel の新 project を作成（Root: `apps/type2-plus`）。
 `sched()` を NoteEvent パイプライン化し、`SequencerPlugin` 契約を実装。
 `noteRepeat` を最初のプラグインとして `apps/type2-plus` で有効化。
 
-## 10. 落とし穴チェックリスト
+## 10. main ↔ feat/apps-split の同期ルール
+
+`feat/apps-split` ブランチが走っている間も、**main ではコア機能の修正・
+アップデートが継続する**前提の運用ルール。Plus はグラフィック拡張専用なので、
+コア修正は main → branch に流す一方通行。
+
+### 基本フロー
+
+```bash
+# feat/apps-split 側で main を取り込む（基本）
+git switch feat/apps-split
+git merge main
+```
+
+- 普段は `git merge main` で取り込む（cherry-pick や rebase は特殊ケース限定）
+- 取り込みは**早め・小さく**。週次〜毎日ぐらいで main を merge して衝突を溜めない
+- コア機能のバグ修正・アップデートは **main で行う** → merge で branch へ流す
+
+### Phase 1〜2 期間中の重複ファイル同期
+
+Phase 1 で以下のファイルは **layer 側にコピー**されて 2 箇所に並存している。
+main 側の修正は merge で自動的にオリジナル側のみ更新され、**layer 側には
+伝播しない**ので手動同期が必要:
+
+| オリジナル（main の修正が届く） | レイヤコピー（手で同期） |
+|---|---|
+| `composables/useMidi.ts` | `layers/core/composables/useMidi.ts` |
+| `composables/useMidiIn.ts` | `layers/core/composables/useMidiIn.ts` |
+| `components/MeterKnob.vue` | `layers/core/components/MeterKnob.vue` |
+| `components/StepCell.vue` | `layers/core/components/StepCell.vue` |
+
+同期手順:
+
+```bash
+git merge main
+# 例：main 側で composables/useMidi.ts に修正が入っていた場合
+cp composables/useMidi.ts layers/core/composables/useMidi.ts
+git add layers/core/composables/useMidi.ts
+git commit -m "sync: propagate main's useMidi fix into layers/core"
+```
+
+### useScheduler.ts の特殊扱い
+
+`composables/useScheduler.ts`（オリジナル）の内容は、layer 側では
+`layers/core/core/pure/*.ts` と `layers/core/core/scheduler/create-scheduler.ts`
+および `layers/core/core/adapters/audio.ts` に**関数単位で分解コピー**
+されている。機械 `cp` で同期できないので以下の対応:
+
+| main 側の修正箇所 | layer 側の反映先 |
+|---|---|
+| `stepCount` / `stepDur` / `autoPreset` / `resizeSteps` / `deriveStepsFromSource` | `layers/core/core/pure/meter.ts` |
+| `applyPending` | `layers/core/core/pure/pending.ts` |
+| `bridgeMeter` / `generateBridge` | `layers/core/core/pure/bridge.ts` |
+| `createScheduler`・`tick`・`sched` 系 | `layers/core/core/scheduler/create-scheduler.ts` |
+| `triggerSound` | `layers/core/core/adapters/audio.ts` |
+| 型（`Track` / `Pending` / `SchedulerDeps`） | `layers/core/core/types/index.ts` |
+
+### Phase 3 以降
+
+`apps/type2/` への移動が完了すると、オリジナル側（`composables/*`・
+`components/*`）は削除される。この時点以降:
+
+- main と branch の構造が大きく乖離するため、以降の main 修正は
+  **cherry-pick + layer 側へ当て直し**が基本になる
+- できればここに至る前に `feat/apps-split` を main に merge してしまう
+  （Phase 3 は機械的な移動作業なので、長引かせる意味が薄い）
+- どうしても branch が長生きする場合は、先に apps-split を main に merge して
+  「新レイアウト = main」にしてから、Plus の RING 改修を別ブランチに切り直す
+
+### 運用上の原則
+
+1. **Plus 側でコア修正を書かない**。Plus は描画・アニメーション・ビジュアル拡張専用
+2. **コア修正は layers/core に**。両アプリから共有されるべきものはレイヤにコミット
+3. **main → branch の merge は頻繁に**、溜めない
+4. **layer 側同期を忘れない**。Phase 1〜2 中は特にチェックリスト化する価値あり
+
+> アーキテクチャ違反のサイン：`apps/type2-plus/components/` 下にスケジューラ
+> ロジックが入っている、`apps/type2-plus/composables/` に MIDI mapping の
+> 挙動変更が入っている、など。こういう修正を見つけたら layers/core に
+> リファクタし直す。
+
+## 11. 落とし穴チェックリスト
 
 - [ ] `~` alias が layer 側と apps 側で別物になる → `#core` で統一する
 - [ ] Tailwind の `content` に layer 側のパスを入れ忘れると class が purge される
@@ -286,7 +393,7 @@ Vercel の新 project を作成（Root: `apps/type2-plus`）。
 - [ ] `vercel.json` はルートから削除し、各 apps に置く
 - [ ] Web MIDI / AudioContext は依然 client-only（SSR 禁）、`.client.ts` で登録
 
-## 11. やらない判断（スコープ固定）
+## 12. やらない判断（スコープ固定）
 
 - **pnpm / npm workspaces 化**: Nuxt Layers だけで成立する間はやらない。必要になる時
   （core を npm publish したい、他フレームワークで使いたい、プラグインを別リポ化したい）が来たら再検討
@@ -295,7 +402,7 @@ Vercel の新 project を作成（Root: `apps/type2-plus`）。
 - **プラグインの動的ロード**（`import()` at runtime）: 静的登録で十分
 - **SSR でスケジューラを走らせる**: `AudioContext` がユーザー gesture 必須なので client-only
 
-## 12. 参照
+## 13. 参照
 
 - `DESIGN.md` — スケジューラ、pure 関数、Pending キュー、Master convergence の設計
 - `README.md` — セットアップ、UI 概要、ユーザー向け機能
