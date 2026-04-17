@@ -66,9 +66,6 @@ const rootRef = ref<SVGGElement | null>(null)
 const flashRefs: SVGCircleElement[] = []
 const needleRefs: SVGLineElement[] = []
 
-// Track previous heads to detect changes
-let prevHeads: number[] = Array(TRACK_COUNT).fill(-1)
-
 // RAF loop state
 let rafId: number | null = null
 let running = false
@@ -105,15 +102,29 @@ function updateOverlay() {
       }
     }
 
-    // Update flash
+    // Update flash (playhead indicator)
     if (flashEl) {
-      const active = trk.steps[head]
-      if (head >= 0 && active && stepsLen > 0) {
+      if (head >= 0 && stepsLen > 0) {
         const fx = dotX(ti, head, stepsLen)
         const fy = dotY(ti, head, stepsLen)
         flashEl.setAttribute('cx', String(fx))
         flashEl.setAttribute('cy', String(fy))
-        flashEl.setAttribute('fill', trk.color)
+
+        if (trk.steps[head]) {
+          // active step at playhead: colored halo
+          flashEl.setAttribute('r', String(dotR(ti) + 3))
+          flashEl.setAttribute('fill', trk.color)
+          flashEl.setAttribute('stroke', 'none')
+          flashEl.setAttribute('opacity', '0.35')
+        } else {
+          // inactive step at playhead: dim gray dot + colored ring
+          // (restores original ConcentricView behavior)
+          flashEl.setAttribute('r', String(dotR(ti)))
+          flashEl.setAttribute('fill', '#3a3d50')
+          flashEl.setAttribute('stroke', trk.color)
+          flashEl.setAttribute('stroke-width', '1')
+          flashEl.setAttribute('opacity', trk.mute ? '0.25' : '1')
+        }
         flashEl.setAttribute('visibility', 'visible')
       } else {
         flashEl.setAttribute('visibility', 'hidden')
@@ -121,14 +132,12 @@ function updateOverlay() {
     }
   }
 
-  prevHeads = heads.slice()
   rafId = requestAnimationFrame(updateOverlay)
 }
 
 function startLoop() {
   if (running) return
   running = true
-  prevHeads = Array(TRACK_COUNT).fill(-1)
   rafId = requestAnimationFrame(updateOverlay)
 }
 
