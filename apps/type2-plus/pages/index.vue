@@ -32,6 +32,8 @@ const {
   trkNum, trkDen, pendingSig,
   isLearning, toggleLearn, bindingLabel, hasBound,
   allMuted, toggleAllMute,
+  // Raw mirrors for RAF-driven overlay (Phase 5 Stage 1)
+  displayHeads, tracksRaw,
 } = useSequencerStore()
 
 // ── UI-local state (not shared across UI variants) ──────────────────
@@ -367,14 +369,16 @@ function onMidiConfigLoaded(e: Event) {
         </div>
       </div>
 
-      <!-- ── CONCENTRIC VIEW ── -->
+      <!-- ── CONCENTRIC VIEW (Phase 5 Stage 1: using ConcentricViewPlus) ── -->
       <template v-else>
         <div class="flex-1 overflow-y-auto flex justify-center items-start p-3" @click="onBackgroundClick">
-          <ConcentricView
+          <ConcentricViewPlus
             :tracks="tracks" :heads="heads" :selected-id="selectedId"
             :audio-on="audioOn"
+            :display-heads="displayHeads"
+            :tracks-raw="tracksRaw"
             @select="onCircleSelect($event)"
-            @toggle="(ti, si) => tog(ti, si)" />
+            @toggle="(ti: number, si: number) => tog(ti, si)" />
         </div>
 
         <!-- Right panel: selected track detail -->
