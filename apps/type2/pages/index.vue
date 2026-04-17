@@ -8,10 +8,9 @@
 // The store is auto-imported via the core layer extended in nuxt.config.ts.
 
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import MeterKnob from '~/components/MeterKnob.vue'
-import CircularTrack from '~/components/CircularTrack.vue'
-import ConcentricView from '~/components/ConcentricView.vue'
-import StepSequencer from '~/components/StepSequencer.vue'
+// Components are auto-imported by Nuxt:
+//   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
+//   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
 
 // ── Store: single reactive brain (state + scheduler lifecycle) ──────
 // Destructuring is safe here: top-level <script setup> bindings preserve
