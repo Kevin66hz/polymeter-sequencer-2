@@ -296,6 +296,11 @@ const selTrack = () => tracks.value[selectedId.value]
 function updSel(patch: Partial<Track>) {
   tracks.value = tracks.value.map((t, i) => i === selectedId.value ? { ...t, ...patch } : t)
 }
+function updDet(patch: Partial<Track>) {
+  if (detailId.value === null) return
+  const id = detailId.value
+  tracks.value = tracks.value.map(t => t.id === id ? { ...t, ...patch } : t)
+}
 function applySel(n: number, d: number, bars: number) {
   const sig = `${n}/${d}`
   const trk = selTrack(); if (!trk) return
@@ -591,8 +596,7 @@ function onMidiConfigLoaded(e: Event) {
               boxShadow: trk.solo ? ('0 0 8px 2px ' + trk.color + '44') : 'none',
             }"
             :class="{
-              'opacity-30': trk.mute,
-              'opacity-30': tracks.some(t=>t.solo) && !trk.solo && !trk.mute,
+              'opacity-30': trk.mute || (tracks.some(t=>t.solo) && !trk.solo),
             }">
 
             <!-- Top row: name + knobs (size 28) -->
@@ -701,13 +705,13 @@ function onMidiConfigLoaded(e: Event) {
                   <span class="text-[9px] text-[#555] w-6">CH</span>
                   <input type="number" min="1" max="16" :value="selTrack()!.midiChannel"
                     class="flex-1 bg-[#111] text-[10px] py-[1px] px-[3px] border border-[#2a2a2a] rounded-sm tabular-nums"
-                    @change="(e) => updSel({ midiChannel: Math.max(1,Math.min(16,Number((e.target as HTMLInputElement).value)|0)) })" />
+                    @input="(e) => updSel({ midiChannel: Math.max(1,Math.min(16,Number((e.target as HTMLInputElement).value)|0)) })" />
                 </div>
                 <div class="flex items-center gap-1">
                   <span class="text-[9px] text-[#555] w-6">N</span>
                   <input type="number" min="0" max="127" :value="selTrack()!.midiNote"
                     class="flex-1 bg-[#111] text-[10px] py-[1px] px-[3px] border border-[#2a2a2a] rounded-sm tabular-nums"
-                    @change="(e) => updSel({ midiNote: Math.max(0,Math.min(127,Number((e.target as HTMLInputElement).value)|0)) })" />
+                    @input="(e) => updSel({ midiNote: Math.max(0,Math.min(127,Number((e.target as HTMLInputElement).value)|0)) })" />
                 </div>
                 <div class="flex items-center gap-1">
                   <span class="text-[9px] text-[#555] w-6">VEL</span>
@@ -804,24 +808,24 @@ function onMidiConfigLoaded(e: Event) {
               <span class="text-[#555] w-8">CH</span>
               <input type="number" min="1" max="16" :value="detTrk()!.midiChannel"
                 class="bg-[#111] text-[#ccc] border border-[#2a2a2a] rounded-sm px-1 py-0 w-[40px] tabular-nums text-[9px]"
-                @change="(e) => { const id=detailId!; const v=Math.max(1,Math.min(16,Number((e.target as HTMLInputElement).value)|0)); tracks.value=tracks.value.map(t=>t.id===id?{...t,midiChannel:v}:t) }" />
+                @input="(e) => updDet({ midiChannel: Math.max(1,Math.min(16,Number((e.target as HTMLInputElement).value)|0)) })" />
             </div>
             <div class="flex items-center gap-2">
               <span class="text-[#555] w-8">NOTE</span>
               <input type="number" min="0" max="127" :value="detTrk()!.midiNote"
                 class="bg-[#111] text-[#ccc] border border-[#2a2a2a] rounded-sm px-1 py-0 w-[40px] tabular-nums text-[9px]"
-                @change="(e) => { const id=detailId!; const v=Math.max(0,Math.min(127,Number((e.target as HTMLInputElement).value)|0)); tracks.value=tracks.value.map(t=>t.id===id?{...t,midiNote:v}:t) }" />
+                @input="(e) => updDet({ midiNote: Math.max(0,Math.min(127,Number((e.target as HTMLInputElement).value)|0)) })" />
             </div>
             <div class="flex items-center gap-2">
               <span class="text-[#555] w-8">VEL</span>
               <input type="range" min="1" max="127" :value="detTrk()!.midiVelocity" class="w-[80px]"
-                @input="(e) => { const id=detailId!; tracks.value=tracks.value.map(t=>t.id===id?{...t,midiVelocity:Number((e.target as HTMLInputElement).value)}:t) }" />
+                @input="(e) => updDet({ midiVelocity: Number((e.target as HTMLInputElement).value) })" />
               <span class="text-[#888] w-5 tabular-nums">{{ detTrk()!.midiVelocity }}</span>
             </div>
             <div class="flex items-center gap-2">
               <span class="text-[#555] w-8">GT</span>
               <input type="range" min="10" max="500" step="10" :value="detTrk()!.gateMs" class="w-[80px]"
-                @input="(e) => { const id=detailId!; tracks.value=tracks.value.map(t=>t.id===id?{...t,gateMs:Number((e.target as HTMLInputElement).value)}:t) }" />
+                @input="(e) => updDet({ gateMs: Number((e.target as HTMLInputElement).value) })" />
               <span class="text-[#888] w-10 tabular-nums">{{ detTrk()!.gateMs }}ms</span>
             </div>
           </div>
