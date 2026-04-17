@@ -28,20 +28,20 @@
       <g v-for="(active, si) in track.steps" :key="si">
         <!-- Hit flash -->
         <circle v-if="head === si && active"
-          :cx="CX" :cy="CY - RING_R"
-          :r="DOT_R + 4" :fill="track.color" opacity="0.3"
+          :cx="CX" :cy="CY - ringR"
+          :r="dotR + 3" :fill="track.color" opacity="0.3"
           class="pointer-events-none ring-dot"
           :style="{ transform: `rotate(${stepDeg(si, track.steps.length)}deg)` }" />
         <!-- Invisible hit zone -->
         <circle
-          :cx="CX" :cy="CY - RING_R"
-          :r="DOT_R + 3" fill="transparent" class="cursor-pointer ring-dot"
+          :cx="CX" :cy="CY - ringR"
+          :r="hitR" fill="transparent" class="cursor-pointer ring-dot"
           :style="{ transform: `rotate(${stepDeg(si, track.steps.length)}deg)` }"
           @click.stop="$emit('toggle', si)" />
         <!-- Visible dot — transition creates clock-sweep on step-count change -->
         <circle
-          :cx="CX" :cy="CY - RING_R"
-          :r="DOT_R"
+          :cx="CX" :cy="CY - ringR"
+          :r="dotR"
           :fill="active ? track.color : (head === si ? '#3a3a3a' : '#2a2a2a')"
           :stroke="head === si ? track.color : 'none'"
           stroke-width="1.5"
@@ -63,11 +63,11 @@
       <text :x="CX" :y="CY - 5" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? '#fff' : '#888'"
-        font-size="9" font-family="monospace" font-weight="bold">{{ audioOn ? track.name : `${track.midiChannel}:${track.midiNote}` }}</text>
+        font-size="9" font-family="monospace" font-weight="bold">{{ audioOn ? track.name : `${track.midiChannel}-${track.midiNote}` }}</text>
       <text :x="CX" :y="CY + 7" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? track.color : '#444'"
-        font-size="8" font-family="monospace">{{ track.timeSig }}</text>
+        font-size="8" font-family="monospace">{{ track.timeSig }} - {{ track.steps.length }}</text>
 
       <!-- 詳細設定ボタン (円の中・選択時のみ表示) -->
       <g v-if="selected" class="detail-btn-group" @click.stop="$emit('openDetail')">
@@ -106,8 +106,32 @@ defineEmits<{
 const CX = 55
 const CY = 55
 const OUTER_R = 50
-const RING_R = 39
-const DOT_R = 4
+const BASE_RING_R = 39
+// アクティブ時にドットが小さい場合の最大リング半径（内側の label/⚙ とぶつからない範囲）
+const MAX_RING_R = 45
+// ドット半径の既定／下限
+const BASE_DOT_R = 4
+const MIN_DOT_R = 1.2
+
+// ドット半径をステップ数に応じて動的に縮小する。
+// ステップ数が多いとき（例: 16/4 = 64 ステップ）は重なりを避けるため小さくする。
+// 弧長 = 2πR / total。ドット直径が弧長の 80% を超えないよう半径は arc * 0.4 で頭打ち、
+// 既定は 4（16 ステップ以下で従来通り）、下限 1.2（小さすぎて消えないため）。
+const dotR = computed(() => {
+  const total = Math.max(1, props.track.steps.length)
+  const arcPerStep = (2 * Math.PI * BASE_RING_R) / total
+  return Math.max(MIN_DOT_R, Math.min(BASE_DOT_R, arcPerStep * 0.4))
+})
+// ドットが小さいほどリング半径を外に押し出して間隔を確保（アクティブ／非アクティブで統一）。
+//   dotR = 4 (通常) → BASE_RING_R
+//   dotR = 1.2 (最小) → MAX_RING_R
+// 線形補間。選択の有無に関わらずサイズ感を一定に保つ。
+const ringR = computed(() => {
+  const t = Math.max(0, Math.min(1, (BASE_DOT_R - dotR.value) / (BASE_DOT_R - MIN_DOT_R)))
+  return BASE_RING_R + t * (MAX_RING_R - BASE_RING_R)
+})
+// クリック用ヒットゾーン半径: dotR + 余白。ただし操作性のため最低 3 を確保。
+const hitR = computed(() => Math.max(3, dotR.value + 2))
 
 // Rotation amount for step si.
 // The circle already starts at 12 o'clock (cy = CY - RING_R = -90°),
@@ -120,11 +144,11 @@ const stepAngle = (si: number, total: number) =>
 
 const needleX = computed(() => {
   if (props.head < 0) return CX
-  return CX + (RING_R - 5) * Math.cos(stepAngle(props.head, props.track.steps.length))
+  return CX + (ringR.value - 5) * Math.cos(stepAngle(props.head, props.track.steps.length))
 })
 const needleY = computed(() => {
   if (props.head < 0) return CY
-  return CY + (RING_R - 5) * Math.sin(stepAngle(props.head, props.track.steps.length))
+  return CY + (ringR.value - 5) * Math.sin(stepAngle(props.head, props.track.steps.length))
 })
 </script>
 

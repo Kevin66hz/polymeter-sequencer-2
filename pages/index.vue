@@ -631,7 +631,7 @@ function onMidiConfigLoaded(e: Event) {
             <div class="flex items-center justify-between flex-shrink-0">
               <span class="text-[8px] tracking-[1px] font-semibold truncate"
                 :style="{ color: trk.color }">
-                {{ audioOn ? trk.name : `${trk.midiChannel}:${trk.midiNote}` }}</span>
+                {{ audioOn ? trk.name : `${trk.midiChannel}-${trk.midiNote}` }}</span>
               <div class="flex items-center gap-0.5 relative" @click.stop>
                 <MeterKnob :model-value="trkNum(trk)" :options="NUM_OPTS" :size="28" :color="trk.color" @change="(v) => setTrackNum(trk.id, v)" />
                 <span class="text-[9px] text-[#333]">/</span>
