@@ -1,7 +1,12 @@
-// Ring geometry constants — shared between RingsStatic, RingsOverlay, ConcentricViewPlus.
+// Ring geometry constants + memoized coordinate lookup.
 //
-// Phase 5 Stage 1: Constants only. Stage 2 will add cached coordinate helpers
-// (ringR, dotX/Y, stepAngle) and precomputed lookup tables here.
+// Shared between RingsStatic, RingsOverlay, ConcentricViewPlus.
+//
+// Phase 5 Stage 2: dot coordinates are a pure function of (ti, total) plus
+// module constants that never change at runtime. We cache them per
+// (ti, total) and hand out { x: number[], y: number[] } arrays. Trig
+// (Math.cos/sin) runs once per cache miss, never again for that combo —
+// so the render path and the RAF overlay loop see only array indexing.
 
 import { TRACK_COUNT } from '#core/types'
 
@@ -20,7 +25,7 @@ export const RADIAL_SPACE = OUTER_R - CENTER_R
 /** Per-ring spacing (depends on track count) */
 export const RING_STEP = RADIAL_SPACE / TRACK_COUNT
 
-// ── Inline geometry helpers (will be memoized/cached in Stage 2) ─────
+// ── Per-track scalars (depend on ti only) ────────────────────────────
 
 /** Radius of ring for track index ti (0 = innermost) */
 export const ringR = (ti: number): number => CENTER_R + RING_STEP * (ti + 0.5)
@@ -32,13 +37,56 @@ export const dotR = (ti: number): number => Math.max(2.5, 2.5 + ti * 0.18)
 export const stepAngle = (si: number, total: number): number =>
   (si / total) * Math.PI * 2 - Math.PI / 2
 
-/** X coordinate for dot at track ti, step si */
-export const dotX = (ti: number, si: number, total: number): number =>
-  CX + ringR(ti) * Math.cos(stepAngle(si, total))
+// ── Memoized dot coordinates, keyed by (ti, total) ───────────────────
 
-/** Y coordinate for dot at track ti, step si */
+/** Precomputed per-step X/Y arrays for a single ring. */
+export type DotCoords = { x: number[]; y: number[] }
+
+const dotCoordsCache = new Map<string, DotCoords>()
+
+/**
+ * Returns precomputed x[] / y[] for every step on ring `ti` when the ring
+ * has `total` steps. First call for a given (ti, total) does the trig;
+ * subsequent calls return the cached arrays. The returned arrays are
+ * treated as immutable — callers must not mutate them.
+ *
+ * Cache size is bounded: 16 tracks × a small set of realistic step counts.
+ * No invalidation is needed because all inputs (module constants and
+ * `total`) are stable.
+ */
+export function getDotCoords(ti: number, total: number): DotCoords {
+  const key = `${ti}:${total}`
+  let cached = dotCoordsCache.get(key)
+  if (!cached) {
+    const r = ringR(ti)
+    const x = new Array<number>(total)
+    const y = new Array<number>(total)
+    for (let si = 0; si < total; si++) {
+      const a = stepAngle(si, total)
+      x[si] = CX + r * Math.cos(a)
+      y[si] = CY + r * Math.sin(a)
+    }
+    cached = { x, y }
+    dotCoordsCache.set(key, cached)
+  }
+  return cached
+}
+
+/**
+ * X coordinate for dot at track ti, step si (total = ring step count).
+ * Backward-compatible shim — delegates to the cache so existing callers
+ * benefit without API change.
+ */
+export const dotX = (ti: number, si: number, total: number): number =>
+  getDotCoords(ti, total).x[si]
+
+/**
+ * Y coordinate for dot at track ti, step si (total = ring step count).
+ * Backward-compatible shim — delegates to the cache so existing callers
+ * benefit without API change.
+ */
 export const dotY = (ti: number, si: number, total: number): number =>
-  CY + ringR(ti) * Math.sin(stepAngle(si, total))
+  getDotCoords(ti, total).y[si]
 
 /** X coordinate for label at top of ring (12 o'clock) */
 export const labelX = (_ti: number): number => CX
