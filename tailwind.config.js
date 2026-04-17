@@ -7,6 +7,11 @@ export default {
     './plugins/**/*.{js,ts}',
     './app.vue',
     './error.vue',
+    // Phase 2: layer-side Vue/TS must be scanned too, otherwise Tailwind
+    // purges classes used only in shared primitives (MeterKnob / StepCell)
+    // or in useSequencerStore. Paths are relative to this config's location.
+    './layers/core/components/**/*.vue',
+    './layers/core/composables/**/*.ts',
   ],
   theme: {
     extend: {

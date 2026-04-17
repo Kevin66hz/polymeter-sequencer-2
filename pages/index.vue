@@ -1,267 +1,48 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import {
-  applyPending,
-  createScheduler,
-  deriveStepsFromSource,
-  generateBridge,
-  stepCount,
-  TRACK_COUNT,
-  type Pending,
-  type Track,
-} from '~/composables/useScheduler'
-import { useMidi } from '~/composables/useMidi'
-import { useMidiIn } from '~/composables/useMidiIn'
+// Phase 2: this page is now a thin view. All sequencer state and control
+// logic lives in `useSequencerStore()` (layers/core/composables). What stays
+// here is strictly UI-local concerns: the view-mode toggle, the BPM slider
+// overlay state, the MIDI-config file input DOM ref, the global space-bar
+// keybinding, and the imperative file download/upload plumbing.
+//
+// The store is auto-imported via the core layer extended in nuxt.config.ts.
+
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import MeterKnob from '~/components/MeterKnob.vue'
 import CircularTrack from '~/components/CircularTrack.vue'
 import ConcentricView from '~/components/ConcentricView.vue'
 import StepSequencer from '~/components/StepSequencer.vue'
 
+// ── Store: single reactive brain (state + scheduler lifecycle) ──────
+// Destructuring is safe here: top-level <script setup> bindings preserve
+// ref reactivity and enable template auto-unwrap.
+const {
+  NUM_OPTS, DEN_OPTS,
+  bpm, playing, tracks, heads, pendQ, selectedId, detailId, audioOn,
+  masterNum, masterDen, masterMode, masterBridgeBars, masterTarget,
+  savedSnapshot, showMapping,
+  midi, midiIn,
+  play, stop,
+  saveSnapshot, recallSnapshot,
+  setTrackNum, setTrackDen, toggleTrackMode,
+  onMasterKnobChange, commitMaster,
+  toggleStep: tog, doMute, doSolo, doClr,
+  onCircleSelect, onBackgroundClick,
+  selTrack, detTrk,
+  updSel, updDet,
+  trkNum, trkDen, pendingSig,
+  isLearning, toggleLearn, bindingLabel, hasBound,
+  allMuted, toggleAllMute,
+} = useSequencerStore()
+
+// ── UI-local state (not shared across UI variants) ──────────────────
 type ViewMode = 'grid' | 'concentric'
 const viewMode = ref<ViewMode>('grid')
+const showBpmOverlay = ref(false)
+const midiConfigInput = ref<HTMLInputElement | null>(null)
 
-const NUM_OPTS = Array.from({ length: 17 }, (_, i) => i)
-const DEN_OPTS = [4, 8, 16] as const
-
-const INIT_SIGS = [
-  '4/4','7/8','9/8','5/4','3/4','11/8','6/8','13/8',
-  '4/4','5/8','7/4','3/8','4/4','7/8','5/4','6/4',
-]
-const NAMES = [
-  'KICK','SNARE','HAT','CLAP','BASS','LEAD','PAD','PERC',
-  'K2','S2','HH2','CL2','B2','LD2','PD2','PC2',
-]
-const COLS = [
-  '#e05050','#e09030','#40b0d0','#c060c0',
-  '#50c080','#6080e0','#e06080','#80c040',
-  '#e07060','#60d0b0','#b060e0','#d0a040',
-  '#40c0c0','#e04080','#90e060','#8060d0',
-]
-const INIT: boolean[][] = [
-  // ch1  KICK  4/4
-  [true,false,false,false,true,false,false,false,true,false,false,false,true,false,false,false],
-  // ch2  SNARE 7/8
-  [false,false,false,false,true,false,false,false,false,false,false,false,true,false,false,false],
-  // ch3  HAT   9/8
-  [true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false],
-  // ch4  CLAP  5/4
-  [false,false,false,false,false,false,false,true,false,false,false,false,false,false,false,false],
-  // ch5  BASS  3/4
-  [true,false,false,true,false,false,true,false,false,false,false,false,false,false,false,false],
-  // ch6  LEAD  11/8
-  [true,false,false,false,false,false,true,false,false,false,false,false,false,false,false,false],
-  // ch7  PAD   6/8
-  [true,false,false,false,true,false,false,false,false,false,false,false,false,false,false,false],
-  // ch8  PERC  13/8
-  [false,false,true,false,false,false,false,true,false,false,true,false,false,false,false,false],
-  // ch9  K2    4/4
-  [true,false,false,false,false,false,true,false,true,false,false,false,false,false,false,false],
-  // ch10 S2    5/8
-  [false,false,false,true,false,false,false,false,false,false,false,false,false,false,false,false],
-  // ch11 HH2   7/4
-  [true,false,false,true,false,false,true,false,false,true,false,false,true,false,false,false],
-  // ch12 CL2   3/8
-  [false,false,true,false,false,false,false,false,false,false,false,false,false,false,false,false],
-  // ch13 B2    4/4
-  [true,false,true,false,false,true,false,false,true,false,false,false,true,false,false,false],
-  // ch14 LD2   7/8
-  [false,false,false,true,false,false,false,false,false,false,false,false,false,false,false,false],
-  // ch15 PD2   5/4
-  [true,false,false,false,false,false,false,false,true,false,false,false,false,false,false,false],
-  // ch16 PC2   6/4
-  [false,true,false,false,false,true,false,false,false,false,true,false,false,false,false,false],
-]
-
-function mkTrk(id: number): Track {
-  const sig = INIT_SIGS[id] ?? '4/4'
-  const [n, d] = sig.split('/').map(Number)
-  const cnt = stepCount(n, d)
-  const pat = INIT[id] ?? INIT[id % 4] ?? []
-  const steps = Array(cnt).fill(false).map((_, i) => !!pat[i])
-  return {
-    id, name: NAMES[id] ?? `CH${id+1}`, timeSig: sig,
-    mode: 'instant', color: COLS[id] ?? '#888',
-    steps, stepsSource: steps.slice(),
-    mute: false, solo: false,
-    midiChannel: (id % 16) + 1, midiNote: 60,
-    midiVelocity: 100, gateMs: 80,
-  }
-}
-
-const parseSig = (s: string): [number, number] => {
-  const [nr, dr] = s.split('/').map(Number)
-  return [Number.isFinite(nr) ? nr : 4, (Number.isFinite(dr) && dr > 0) ? dr : 4]
-}
-
-// ── state ──────────────────────────────────────────────
-const bpm = ref(120)
-const playing = ref(false)
-const tracks = ref<Track[]>(Array.from({ length: TRACK_COUNT }, (_, i) => mkTrk(i)))
-const heads = ref<number[]>(Array(TRACK_COUNT).fill(-1))
-const pendQ = ref<Pending[][]>(Array.from({ length: TRACK_COUNT }, () => []))
-const selectedId = ref<number>(-1)
-const detailId = ref<number | null>(null)
-
-// ── 円クリック: 選択 + スライドが開いていれば切替 ───────────
-function onCircleSelect(id: number) {
-  selectedId.value = id
-  // 下端のスライドエリアが開いているときは、そのトラックに切り替える
-  if (detailId.value !== null) detailId.value = id
-}
-// ── 背景クリック: 選択解除 & スライドエリアを閉じる ─────────
-function onBackgroundClick() {
-  selectedId.value = -1
-  detailId.value = null
-}
-// ── グローバル Audio ON/OFF (Web Audio 合成音。MIDIは常時送信) ──
-const audioOn = ref(true)
-const audioEnabledRef = { current: true }
-watch(audioOn, v => { audioEnabledRef.current = v })
-const detTrk = () => detailId.value !== null ? (tracks.value[detailId.value] ?? null) : null
-
-const masterNum = ref(4)
-const masterDen = ref<4|8|16>(4)
-const masterMode = ref<'instant'|'transition'>('instant')
-const masterBridgeBars = ref<1|2>(1)
-const masterTarget = ref<string | null>(null)
-const flash = ref(false)
-let masterStepsSnapshot: boolean[][] | null = null
-
-// ── パターンスナップショット ───────────────────────────────
-type TrackSnapshot = { steps: boolean[], stepsSource: boolean[], timeSig: string }
-const savedSnapshot = ref<TrackSnapshot[] | null>(null)
-
-function saveSnapshot() {
-  savedSnapshot.value = tracks.value.map(t => ({
-    steps: t.steps.slice(),
-    stepsSource: t.stepsSource.slice(),
-    timeSig: t.timeSig,
-  }))
-}
-
-function recallSnapshot() {
-  const snap = savedSnapshot.value; if (!snap) return
-  midi.panic()
-  const instant = masterMode.value === 'instant' || !playing.value
-
-  if (instant) {
-    // 即時リストア: 拍子・ステップすべてを戻す
-    tracks.value = tracks.value.map((t, i) => {
-      const s = snap[i]; if (!s) return t
-      const [n, d] = parseSig(s.timeSig)
-      const cnt = stepCount(n, d)
-      const steps = Array(cnt).fill(false).map((_, j) => s.steps[j] ?? false)
-      return { ...t, timeSig: s.timeSig, steps, stepsSource: s.stepsSource.slice() }
-    })
-    pendQ.value = pendQ.value.map(() => [])
-  } else {
-    // TRANSITION: stepsSource をスナップショットに差し替えてから拍子をブリッジ遷移
-    // → applyPending が最終拍子で deriveStepsFromSource を呼ぶときスナップのステップが出る
-    tracks.value = tracks.value.map((t, i) => {
-      const s = snap[i]; if (!s) return t
-      if (t.timeSig === s.timeSig) {
-        // 拍子が同じ → ブリッジ不要、ステップだけ即時リストア
-        const [n, d] = parseSig(s.timeSig)
-        const cnt = stepCount(n, d)
-        const steps = Array(cnt).fill(false).map((_, j) => s.steps[j] ?? false)
-        return { ...t, steps, stepsSource: s.stepsSource.slice() }
-      }
-      // 拍子が違う → stepsSource だけ先に差し替え（ブリッジ遷移先で正しいステップになる）
-      return { ...t, stepsSource: s.stepsSource.slice() }
-    })
-    pendQ.value = tracks.value.map((t, i) => {
-      const s = snap[i]; if (!s || t.timeSig === s.timeSig) return []
-      return generateBridge(t.timeSig, s.timeSig, masterBridgeBars.value)
-    })
-  }
-}
-
-// ── raw mirrors ────────────────────────────────────────
-const bpmRaw = { current: bpm.value }
-const tracksRaw = { current: tracks.value.map(t => ({ ...t, steps: [...t.steps] })) }
-const pendingRaw = { current: Array.from({ length: TRACK_COUNT }, () => [] as Pending[]) }
-const displayHeads = { current: Array(TRACK_COUNT).fill(-1) as number[] }
-const masterTargetRef = { current: null as string | null }
-const applyFnRef: { current: ((id: number, p: Pending) => void) | null } = { current: null }
-applyFnRef.current = (id, p) => {
-  tracks.value = tracks.value.map(t => t.id !== id ? t : applyPending(t, p))
-  pendQ.value = pendQ.value.map((q, i) => i === id ? q.slice(1) : q)
-}
-
-// ── MIDI ───────────────────────────────────────────────
-const midi = useMidi()
-const midiFireRef: { current: ((id: number) => void) | null } = { current: null }
-
-const midiIn = useMidiIn({
-  onPlay: () => { if (!playing.value) play() },
-  onStop: () => { if (playing.value) stop() },
-  onCCMapped: (controlId, rawValue) => {
-    if (controlId === 'bpm') { bpm.value = Math.round(rawValue * 2 + 40) }
-    else if (controlId === 'masterN') { masterNum.value = Math.round((rawValue/127)*16); onMasterKnobChange() }
-    else if (controlId === 'masterD') {
-      const opts = [4,8,16] as const
-      masterDen.value = opts[rawValue < 43 ? 0 : rawValue < 85 ? 1 : 2]
-      onMasterKnobChange()
-    }
-    else if (controlId === 'master_apply' && rawValue > 63) { commitMaster() }
-  },
-})
-watch(() => midiIn.state.syncBpm, v => {
-  if (midiIn.state.syncMode === 'external' && v !== null) { bpmRaw.current = v; bpm.value = v }
-})
-
-const showMapping = ref(false)
-
-midiFireRef.current = (id) => {
-  if (!midi.selectedId.value) return
-  const trk = tracksRaw.current[id]; if (!trk) return
-  midi.sendNoteOn(trk.midiChannel, trk.midiNote, trk.midiVelocity ?? 100)
-  setTimeout(() => midi.sendNoteOff(trk.midiChannel, trk.midiNote), trk.gateMs ?? 80)
-}
-
-watch(bpm, v => { bpmRaw.current = v })
-watch(tracks, v => { tracksRaw.current = v.map(t => ({ ...t, steps: [...t.steps] })) }, { deep: true })
-watch(pendQ, v => { pendingRaw.current = v.map(q => q.map(p => ({ ...p }))) }, { deep: true })
-watch(masterTarget, v => { masterTargetRef.current = v })
-
-// ── scheduler ──────────────────────────────────────────
-let scheduler: ReturnType<typeof createScheduler> | null = null
-
-function handleMasterReset() {
-  flash.value = true; setTimeout(() => { flash.value = false }, 260)
-  midi.panic()
-  const snap = masterStepsSnapshot
-  tracks.value = tracks.value.map((t, i) => {
-    const [n, d] = parseSig(t.timeSig)
-    const base = snap?.[i] ?? t.stepsSource
-    const newLen = stepCount(n, d)
-    const { steps, stepsSource } = deriveStepsFromSource(base, newLen, n, d)
-    return { ...t, steps, stepsSource }
-  })
-  masterStepsSnapshot = null; masterTarget.value = null
-}
-
-onMounted(async () => {
-  await midiIn.init()
-  scheduler = createScheduler({
-    bpmRaw, tracksRaw, pendingRaw, displayHeads,
-    applyFnRef, midiFireRef, audioEnabledRef, masterTargetRef,
-    onHeadsTick: h => { heads.value = h },
-    onMasterReset: () => handleMasterReset(),
-  })
-  window.addEventListener('keydown', onGlobalKeyDown)
-})
-onBeforeUnmount(() => {
-  scheduler?.dispose(); midi.panic()
-  window.removeEventListener('keydown', onGlobalKeyDown)
-})
-
-function play() { if (playing.value) return; playing.value = true; scheduler?.play() }
-function stop() { playing.value = false; scheduler?.stop(); midi.panic() }
-
-// ── グローバルキーバインド (スペース = play/stop) ─────────
+// ── Global keybind: Space = play/stop (skip when typing in fields) ──
 function onGlobalKeyDown(e: KeyboardEvent) {
-  // テキスト入力中は無視
   const t = e.target as HTMLElement | null
   const tag = t?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return
@@ -270,93 +51,10 @@ function onGlobalKeyDown(e: KeyboardEvent) {
     playing.value ? stop() : play()
   }
 }
+onMounted(() => { window.addEventListener('keydown', onGlobalKeyDown) })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onGlobalKeyDown) })
 
-// ── track meter ────────────────────────────────────────
-function commitTrackSig(id: number, n: number, d: number) {
-  const target = `${n}/${d}`; const trk = tracks.value[id]; if (!trk) return
-  if (trk.timeSig === target && pendQ.value[id].length === 0) return
-  if (!playing.value) {
-    tracks.value = tracks.value.map(t => t.id !== id ? t : applyPending(t, { timeSig: target }))
-    pendQ.value = pendQ.value.map((q, i) => i === id ? [] : q); return
-  }
-  const queue = trk.mode === 'transition' ? generateBridge(trk.timeSig, target, 1) : [{ timeSig: target }]
-  pendQ.value = pendQ.value.map((q, i) => i === id ? queue : q)
-}
-function setTrackNum(id: number, n: number) { const [,d] = parseSig(tracks.value[id].timeSig); commitTrackSig(id, n, d) }
-function setTrackDen(id: number, d: number) { const [n] = parseSig(tracks.value[id].timeSig); commitTrackSig(id, n, d) }
-function toggleTrackMode(id: number) {
-  tracks.value = tracks.value.map(t => t.id !== id ? t : { ...t, mode: t.mode === 'instant' ? 'transition' : 'instant' })
-}
-
-// ── master meter ───────────────────────────────────────
-function onMasterKnobChange() { if (masterMode.value === 'instant') commitMaster() }
-function commitMaster() {
-  const target = `${masterNum.value}/${masterDen.value}`
-  masterStepsSnapshot = tracks.value.map(t => [...t.stepsSource])
-  if (!playing.value) {
-    tracks.value = tracks.value.map(t => applyPending(t, { timeSig: target }))
-    pendQ.value = pendQ.value.map(() => []); masterTarget.value = null; masterStepsSnapshot = null; return
-  }
-  const bars = masterMode.value === 'transition' ? masterBridgeBars.value : 0
-  pendQ.value = tracks.value.map(t => bars === 0 ? [{ timeSig: target }] : generateBridge(t.timeSig, target, bars))
-  masterTarget.value = target
-}
-
-// ── track ops ──────────────────────────────────────────
-function tog(id: number, si: number) {
-  tracks.value = tracks.value.map(t => {
-    if (t.id !== id) return t
-    const newSteps = t.steps.map((s, i) => i === si ? !s : s)
-    const newSource = t.stepsSource.slice(); newSource[si] = newSteps[si]
-    return { ...t, steps: newSteps, stepsSource: newSource }
-  })
-}
-function doMute(id: number) { tracks.value = tracks.value.map(t => t.id === id ? { ...t, mute: !t.mute } : t) }
-function doSolo(id: number) { tracks.value = tracks.value.map(t => t.id === id ? { ...t, solo: !t.solo } : t) }
-function doClr(id: number) {
-  tracks.value = tracks.value.map(t => t.id !== id ? t : {
-    ...t, steps: Array(t.steps.length).fill(false), stepsSource: Array(t.stepsSource.length).fill(false)
-  })
-}
-
-// ── selected track detail ──────────────────────────────
-const selTrack = () => tracks.value[selectedId.value]
-function updSel(patch: Partial<Track>) {
-  tracks.value = tracks.value.map((t, i) => i === selectedId.value ? { ...t, ...patch } : t)
-}
-function updDet(patch: Partial<Track>) {
-  if (detailId.value === null) return
-  const id = detailId.value
-  tracks.value = tracks.value.map(t => t.id === id ? { ...t, ...patch } : t)
-}
-function applySel(n: number, d: number, bars: number) {
-  const sig = `${n}/${d}`
-  const trk = selTrack(); if (!trk) return
-  if (!playing.value) { tracks.value = tracks.value.map((t, i) => i === selectedId.value ? applyPending(t, { timeSig: sig }) : t); return }
-  const queue = generateBridge(trk.timeSig, sig, bars)
-  pendQ.value = pendQ.value.map((q, i) => i === selectedId.value ? [...q, ...queue] : q)
-}
-
-function trkNum(t: Track) { return parseSig(t.timeSig)[0] }
-function trkDen(t: Track) { return parseSig(t.timeSig)[1] }
-function pendingSig(i: number) { const q = pendQ.value[i]; return q.length > 0 ? q[q.length-1].timeSig : null }
-
-function isLearning(id: string) { return midiIn.state.learnControlId === id }
-function toggleLearn(id: string) { if (isLearning(id)) midiIn.cancelLearn(); else midiIn.startLearn(id) }
-function bindingLabel(id: string) {
-  const m = midiIn.getMappingFor(id); if (!m) return '+'; return `${m.type.toUpperCase()}${m.number} ch${m.channel}`
-}
-function hasBound(id: string) { return !!midiIn.getMappingFor(id) }
-
-const showBpmOverlay = ref(false)
-const midiConfigInput = ref<HTMLInputElement | null>(null)
-
-// ── ALL MUTE ─────────────────────────────────────────────
-const allMuted = computed(() => tracks.value.every(t => t.mute))
-function toggleAllMute() {
-  const mute = !allMuted.value
-  tracks.value = tracks.value.map(t => ({ ...t, mute }))
-}
+// ── MIDI config download / upload (needs DOM refs, so stays in page) ─
 function downloadMidiConfig() {
   const blob = new Blob([midiIn.saveMappings()], { type: 'application/json' })
   const url = URL.createObjectURL(blob); const a = document.createElement('a')

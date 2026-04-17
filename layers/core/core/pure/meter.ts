@@ -1,5 +1,12 @@
 // Pure meter / grid math. Zero side effects.
 
+// Parse "n/d" into [n, d] with sane fallbacks (both default to 4 if NaN).
+// Shared helper — used by store, pending application, and UI meter helpers.
+export const parseSig = (s: string): [number, number] => {
+  const [nr, dr] = s.split('/').map(Number)
+  return [Number.isFinite(nr) ? nr : 4, (Number.isFinite(dr) && dr > 0) ? dr : 4]
+}
+
 // 16th-note grid: a bar of n/d = round(n * 16 / d) steps.
 // Numerator 0 is the "drop" marker: a silent bar of standard 16-step length.
 export const stepCount = (n: number, d: number) => {
