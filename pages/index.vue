@@ -99,8 +99,20 @@ const playing = ref(false)
 const tracks = ref<Track[]>(Array.from({ length: TRACK_COUNT }, (_, i) => mkTrk(i)))
 const heads = ref<number[]>(Array(TRACK_COUNT).fill(-1))
 const pendQ = ref<Pending[][]>(Array.from({ length: TRACK_COUNT }, () => []))
-const selectedId = ref(0)
+const selectedId = ref<number>(-1)
 const detailId = ref<number | null>(null)
+
+// ── 円クリック: 選択 + スライドが開いていれば切替 ───────────
+function onCircleSelect(id: number) {
+  selectedId.value = id
+  // 下端のスライドエリアが開いているときは、そのトラックに切り替える
+  if (detailId.value !== null) detailId.value = id
+}
+// ── 背景クリック: 選択解除 & スライドエリアを閉じる ─────────
+function onBackgroundClick() {
+  selectedId.value = -1
+  detailId.value = null
+}
 // ── グローバル Audio ON/OFF (Web Audio 合成音。MIDIは常時送信) ──
 const audioOn = ref(true)
 const audioEnabledRef = { current: true }
@@ -237,11 +249,27 @@ onMounted(async () => {
     onHeadsTick: h => { heads.value = h },
     onMasterReset: () => handleMasterReset(),
   })
+  window.addEventListener('keydown', onGlobalKeyDown)
 })
-onBeforeUnmount(() => { scheduler?.dispose(); midi.panic() })
+onBeforeUnmount(() => {
+  scheduler?.dispose(); midi.panic()
+  window.removeEventListener('keydown', onGlobalKeyDown)
+})
 
 function play() { if (playing.value) return; playing.value = true; scheduler?.play() }
 function stop() { playing.value = false; scheduler?.stop(); midi.panic() }
+
+// ── グローバルキーバインド (スペース = play/stop) ─────────
+function onGlobalKeyDown(e: KeyboardEvent) {
+  // テキスト入力中は無視
+  const t = e.target as HTMLElement | null
+  const tag = t?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault()
+    playing.value ? stop() : play()
+  }
+}
 
 // ── track meter ────────────────────────────────────────
 function commitTrackSig(id: number, n: number, d: number) {
@@ -586,7 +614,7 @@ function onMidiConfigLoaded(e: Event) {
     <div class="flex-1 flex min-h-0 overflow-hidden">
 
       <!-- ── GRID VIEW: 8×2、スクロールなし ── -->
-      <div v-if="viewMode==='grid'" class="flex-1 min-h-0 p-2">
+      <div v-if="viewMode==='grid'" class="flex-1 min-h-0 p-2" @click="onBackgroundClick">
         <div class="grid grid-cols-8 grid-rows-2 gap-2 h-full">
           <div v-for="trk in tracks" :key="trk.id"
             class="border flex flex-col min-h-0 px-1.5 py-1 gap-1 transition-all"
@@ -603,8 +631,8 @@ function onMidiConfigLoaded(e: Event) {
             <div class="flex items-center justify-between flex-shrink-0">
               <span class="text-[8px] tracking-[1px] font-semibold truncate"
                 :style="{ color: trk.color }">
-                {{ audioOn ? trk.name : trk.midiChannel }}</span>
-              <div class="flex items-center gap-0.5 relative">
+                {{ audioOn ? trk.name : `${trk.midiChannel}:${trk.midiNote}` }}</span>
+              <div class="flex items-center gap-0.5 relative" @click.stop>
                 <MeterKnob :model-value="trkNum(trk)" :options="NUM_OPTS" :size="28" :color="trk.color" @change="(v) => setTrackNum(trk.id, v)" />
                 <span class="text-[9px] text-[#333]">/</span>
                 <MeterKnob :model-value="trkDen(trk)" :options="DEN_OPTS" :size="28" :color="trk.color" @change="(v) => setTrackDen(trk.id, v)" />
@@ -613,16 +641,18 @@ function onMidiConfigLoaded(e: Event) {
             </div>
 
             <!-- Circle -->
-            <div class="flex-1 min-h-0 min-w-0 flex justify-center items-center overflow-hidden">
+            <div class="flex-1 min-h-0 min-w-0 flex justify-center items-center overflow-visible">
               <CircularTrack
                 :track="trk" :head="heads[trk.id]" :selected="selectedId === trk.id"
                 :audio-on="audioOn"
-                @select="selectedId = trk.id"
-                @toggle="(si) => tog(trk.id, si)" />
+                :detail-active="detailId === trk.id"
+                @select="onCircleSelect(trk.id)"
+                @toggle="(si) => tog(trk.id, si)"
+                @open-detail="detailId = detailId === trk.id ? null : trk.id" />
             </div>
 
-            <!-- Bottom row: M/S/CLR + 詳細ボタン -->
-            <div class="flex items-center justify-between flex-shrink-0">
+            <!-- Bottom row: M/S/CLR (詳細ボタンは円の中に移設) -->
+            <div class="flex items-center justify-start flex-shrink-0">
               <div class="flex gap-[3px]">
                 <button class="py-[2px] px-[6px] text-[9px] border rounded-sm"
                   :style="{ background: trk.mute?'#88888833':'transparent', color: trk.mute?'#ddd':'#555', borderColor: trk.mute?'#888':'#2a2a2a' }"
@@ -633,11 +663,6 @@ function onMidiConfigLoaded(e: Event) {
                 <button class="py-[2px] px-[6px] text-[9px] border border-[#2a2a2a] bg-transparent text-[#555] rounded-sm hover:text-[#ccc]"
                   @click.stop="doClr(trk.id)">✕</button>
               </div>
-              <!-- 詳細設定ボタン -->
-              <button
-                class="py-[2px] px-[6px] text-[11px] border rounded-sm leading-none"
-                :style="{ color: detailId===trk.id ? trk.color : '#444', borderColor: detailId===trk.id ? trk.color+'66' : '#2a2a2a', background: detailId===trk.id ? trk.color+'11' : 'transparent' }"
-                @click.stop="detailId = detailId === trk.id ? null : trk.id">⚙</button>
             </div>
 
 
@@ -647,16 +672,17 @@ function onMidiConfigLoaded(e: Event) {
 
       <!-- ── CONCENTRIC VIEW ── -->
       <template v-else>
-        <div class="flex-1 overflow-y-auto flex justify-center items-start p-3">
+        <div class="flex-1 overflow-y-auto flex justify-center items-start p-3" @click="onBackgroundClick">
           <ConcentricView
             :tracks="tracks" :heads="heads" :selected-id="selectedId"
             :audio-on="audioOn"
-            @select="selectedId = $event"
+            @select="onCircleSelect($event)"
             @toggle="(ti, si) => tog(ti, si)" />
         </div>
 
         <!-- Right panel: selected track detail -->
-        <div class="w-[180px] bg-[#0c0c0c] border-l border-[#1e1e1e] p-3 flex flex-col gap-3 overflow-y-auto flex-shrink-0 text-[11px]">
+        <div class="w-[180px] bg-[#0c0c0c] border-l border-[#1e1e1e] p-3 flex flex-col gap-3 overflow-y-auto flex-shrink-0 text-[11px]"
+          @click.stop>
           <template v-if="selTrack()">
             <div class="font-semibold tracking-[1px] pb-1 border-b"
               :style="{ color: selTrack()!.color, borderColor: selTrack()!.color+'44' }">
@@ -744,7 +770,8 @@ function onMidiConfigLoaded(e: Event) {
       <div v-if="detTrk()"
         class="fixed bottom-0 left-0 right-0 z-50 bg-[#0c0c0c] font-mono"
         style="height:168px; border-top: 2px solid"
-        :style="{ borderColor: detTrk()!.color + '99' }">
+        :style="{ borderColor: detTrk()!.color + '99' }"
+        @click.stop>
 
         <!-- ヘッダー行 -->
         <div class="flex items-center gap-2 px-3 border-b border-[#1e1e1e]"

@@ -22,7 +22,7 @@
           :stroke-width="selectedId === ti ? 1.5 : 0.8"
           opacity="0.6"
           class="cursor-pointer"
-          @click="$emit('select', ti)"
+          @click.stop="$emit('select', ti)"
         />
 
         <!-- Step dots on this ring -->
@@ -84,7 +84,7 @@
           :font-size="selectedId === ti ? 8 : 7"
           font-family="monospace"
           font-weight="bold"
-        >{{ audioOn ? trk.name : trk.midiChannel }}</text>
+        >{{ audioOn ? trk.name : `${trk.midiChannel}:${trk.midiNote}` }}</text>
       </g>
 
       <!-- 開発中 全面オーバーレイ -->
@@ -109,7 +109,7 @@
         text-anchor="middle" dominant-baseline="middle"
         fill="#ffffff" font-size="11" font-family="monospace" font-weight="bold"
         class="pointer-events-none"
-      >{{ audioOn ? (selectedTrack?.name ?? '') : (selectedTrack ? String(selectedTrack.midiChannel) : '') }}</text>
+      >{{ audioOn ? (selectedTrack?.name ?? '') : (selectedTrack ? `${selectedTrack.midiChannel}:${selectedTrack.midiNote}` : '') }}</text>
       <text
         :x="CX" :y="CY + 6"
         text-anchor="middle" dominant-baseline="middle"

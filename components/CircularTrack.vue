@@ -2,7 +2,7 @@
   <div
     class="circular-track"
     :class="{ selected, muted: track.mute }"
-    @click="$emit('select')"
+    @click.stop="$emit('select')"
   >
     <!-- viewBox fixed at 110×110; SVG fills parent via width/height 100% -->
     <svg
@@ -63,11 +63,24 @@
       <text :x="CX" :y="CY - 5" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? '#fff' : '#888'"
-        font-size="9" font-family="monospace" font-weight="bold">{{ audioOn ? track.name : track.midiChannel }}</text>
+        font-size="9" font-family="monospace" font-weight="bold">{{ audioOn ? track.name : `${track.midiChannel}:${track.midiNote}` }}</text>
       <text :x="CX" :y="CY + 7" text-anchor="middle" dominant-baseline="middle"
         class="pointer-events-none"
         :fill="selected ? track.color : '#444'"
         font-size="8" font-family="monospace">{{ track.timeSig }}</text>
+
+      <!-- 詳細設定ボタン (円の中・選択時のみ表示) -->
+      <g v-if="selected" class="detail-btn-group" @click.stop="$emit('openDetail')">
+        <circle :cx="CX" :cy="CY + 22" r="6"
+          :fill="detailActive ? track.color + '33' : '#121212'"
+          :stroke="detailActive ? track.color : track.color + '88'"
+          stroke-width="1"
+          class="cursor-pointer" />
+        <text :x="CX" :y="CY + 21" text-anchor="middle" dominant-baseline="central"
+          :fill="detailActive ? track.color : track.color + 'cc'"
+          font-size="11" font-family="monospace"
+          class="pointer-events-none select-none">⚙</text>
+      </g>
     </svg>
   </div>
 </template>
@@ -81,11 +94,13 @@ const props = defineProps<{
   head: number
   selected: boolean
   audioOn: boolean
+  detailActive?: boolean
 }>()
 
 defineEmits<{
   select: []
   toggle: [stepIndex: number]
+  openDetail: []
 }>()
 
 const CX = 55
@@ -121,9 +136,14 @@ const needleY = computed(() => {
   width: 100%;
   height: auto;
   cursor: pointer;
+  position: relative;
+  z-index: 1;
   transition: transform 0.1s;
 }
-.circular-track.selected { transform: scale(1.04); }
+.circular-track.selected {
+  transform: scale(1.12);
+  z-index: 20;
+}
 .circular-track.muted { opacity: 0.4; }
 
 /*

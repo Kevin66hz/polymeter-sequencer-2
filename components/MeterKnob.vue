@@ -79,7 +79,10 @@ let dragStartIdx = 0
 let dragging = false
 
 const onPointerDown = (e: PointerEvent) => {
-  ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+  const el = e.target as HTMLElement
+  el.setPointerCapture?.(e.pointerId)
+  // クリックで tabindex="0" の枠へフォーカスを当てる（キーボード操作を有効化）
+  el.focus?.()
   dragging = true
   dragStartY = e.clientY
   dragStartIdx = localIdx.value
@@ -118,13 +121,23 @@ const onKeyDown = (e: KeyboardEvent) => {
     e.preventDefault()
   }
 }
+
+// ── Focus state (クリックで tabindex にフォーカスが当たったら active 表示) ──
+const focused = ref(false)
+const onFocus = () => { focused.value = true }
+const onBlur = () => { focused.value = false }
 </script>
 
 <template>
   <div class="flex flex-col items-center select-none" :style="{ width: size + 'px' }">
     <div
-      class="relative rounded-full bg-neutral-900 border border-neutral-700 cursor-ns-resize touch-none outline-none focus:border-neutral-400"
-      :style="{ width: size + 'px', height: size + 'px' }"
+      class="relative rounded-full bg-neutral-900 border cursor-ns-resize touch-none outline-none transition-shadow"
+      :style="{
+        width: size + 'px',
+        height: size + 'px',
+        borderColor: focused ? color : '#525252',
+        boxShadow: focused ? `0 0 0 2px ${color}55` : 'none',
+      }"
       tabindex="0"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
@@ -132,6 +145,8 @@ const onKeyDown = (e: KeyboardEvent) => {
       @pointercancel="onPointerUp"
       @wheel.prevent="onWheel"
       @keydown="onKeyDown"
+      @focus="onFocus"
+      @blur="onBlur"
     >
       <!-- Indicator line -->
       <div
