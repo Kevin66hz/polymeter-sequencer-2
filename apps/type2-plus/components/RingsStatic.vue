@@ -28,12 +28,14 @@
         @click.stop="$emit('select', ti)"
       />
 
-      <!-- Step dots on this ring -->
+      <!-- Step dots on this ring.
+           trackCoords[ti] is a precomputed { x: number[], y: number[] } —
+           template reads are plain array lookups, no trig on the hot path. -->
       <g v-for="(active, si) in trk.steps" :key="si">
         <!-- Invisible hit zone (larger click target) -->
         <circle
-          :cx="dotX(ti, si, trk.steps.length)"
-          :cy="dotY(ti, si, trk.steps.length)"
+          :cx="trackCoords[ti].x[si]"
+          :cy="trackCoords[ti].y[si]"
           :r="dotR(ti) + 3"
           fill="transparent"
           class="cursor-pointer"
@@ -41,8 +43,8 @@
         />
         <!-- Visible dot (static state only — no playhead highlight here) -->
         <circle
-          :cx="dotX(ti, si, trk.steps.length)"
-          :cy="dotY(ti, si, trk.steps.length)"
+          :cx="trackCoords[ti].x[si]"
+          :cy="trackCoords[ti].y[si]"
           :r="dotR(ti)"
           :fill="active ? trk.color : '#1c1e2e'"
           :opacity="trk.mute ? 0.25 : 1"
@@ -67,10 +69,11 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { Track } from '#core/types'
-import { CX, CY, ringR, dotR, dotX, dotY, labelX, labelY } from './rings-geom'
+import { CX, CY, ringR, dotR, getDotCoords, labelX, labelY } from './rings-geom'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   tracks: Track[]
   selectedId: number
   audioOn: boolean
@@ -82,4 +85,16 @@ defineEmits<{
   select: [trackId: number]
   toggle: [trackId: number, stepIndex: number]
 }>()
+
+/**
+ * Per-track dot coordinates. Re-evaluated when a track's step count
+ * changes (pattern length = meter change). Each entry is a shared
+ * reference into the module-level cache in rings-geom so the trig only
+ * runs on the first encounter of a given (ti, total) combo.
+ *
+ * Template reads `trackCoords[ti].x[si]` / `.y[si]` — two array lookups.
+ */
+const trackCoords = computed(() =>
+  props.tracks.map((trk, ti) => getDotCoords(ti, trk.steps.length)),
+)
 </script>

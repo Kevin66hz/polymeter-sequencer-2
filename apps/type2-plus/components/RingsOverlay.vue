@@ -48,7 +48,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { TRACK_COUNT, type Track } from '#core/types'
-import { CX, CY, ringR, dotR, dotX, dotY } from './rings-geom'
+import { CX, CY, ringR, dotR, getDotCoords } from './rings-geom'
 
 const props = defineProps<{
   /** Raw mirror: { current: number[] } — read directly in RAF loop */
@@ -86,49 +86,60 @@ function updateOverlay() {
     const stepsLen = trk.steps.length
     const isSelected = props.selectedId === ti
 
+    // Hide both overlays if there's nothing to show (no head, or empty ring).
+    // Early-out avoids the cache lookup entirely for stopped tracks.
+    if (head < 0 || stepsLen <= 0) {
+      needleEl?.setAttribute('visibility', 'hidden')
+      flashEl?.setAttribute('visibility', 'hidden')
+      continue
+    }
+
+    // Defensive: during a time-sig transition, the scheduler's head index
+    // and tracksRaw.current[ti].steps.length are not updated atomically.
+    // `head` may briefly outlive a shrinking pattern (e.g. head=12 while
+    // steps just dropped to length 8). Wrap via modulo to stay in bounds,
+    // mirroring the implicit trig wrap that Stage 1's dotX/dotY relied on.
+    // Without this, coords.x[head] is undefined → SVG attribute becomes
+    // NaN → needle tip snaps to (0,0), appearing to shoot outside the ring.
+    const safeHead = head >= stepsLen ? head % stepsLen : head
+
+    // One cache lookup per track per frame. Both needle tip and flash
+    // position share the same (headX, headY).
+    const coords = getDotCoords(ti, stepsLen)
+    const headX = coords.x[safeHead]
+    const headY = coords.y[safeHead]
+
     // Update needle
     if (needleEl) {
-      if (head >= 0 && stepsLen > 0) {
-        const tipX = dotX(ti, head, stepsLen)
-        const tipY = dotY(ti, head, stepsLen)
-        needleEl.setAttribute('x2', String(tipX))
-        needleEl.setAttribute('y2', String(tipY))
-        needleEl.setAttribute('stroke', trk.color)
-        needleEl.setAttribute('stroke-width', isSelected ? '1.5' : '0.8')
-        needleEl.setAttribute('opacity', isSelected ? '0.9' : '0.5')
-        needleEl.setAttribute('visibility', 'visible')
-      } else {
-        needleEl.setAttribute('visibility', 'hidden')
-      }
+      needleEl.setAttribute('x2', String(headX))
+      needleEl.setAttribute('y2', String(headY))
+      needleEl.setAttribute('stroke', trk.color)
+      needleEl.setAttribute('stroke-width', isSelected ? '1.5' : '0.8')
+      needleEl.setAttribute('opacity', isSelected ? '0.9' : '0.5')
+      needleEl.setAttribute('visibility', 'visible')
     }
 
     // Update flash (playhead indicator)
     if (flashEl) {
-      if (head >= 0 && stepsLen > 0) {
-        const fx = dotX(ti, head, stepsLen)
-        const fy = dotY(ti, head, stepsLen)
-        flashEl.setAttribute('cx', String(fx))
-        flashEl.setAttribute('cy', String(fy))
+      flashEl.setAttribute('cx', String(headX))
+      flashEl.setAttribute('cy', String(headY))
 
-        if (trk.steps[head]) {
-          // active step at playhead: colored halo
-          flashEl.setAttribute('r', String(dotR(ti) + 3))
-          flashEl.setAttribute('fill', trk.color)
-          flashEl.setAttribute('stroke', 'none')
-          flashEl.setAttribute('opacity', '0.35')
-        } else {
-          // inactive step at playhead: dim gray dot + colored ring
-          // (restores original ConcentricView behavior)
-          flashEl.setAttribute('r', String(dotR(ti)))
-          flashEl.setAttribute('fill', '#3a3d50')
-          flashEl.setAttribute('stroke', trk.color)
-          flashEl.setAttribute('stroke-width', '1')
-          flashEl.setAttribute('opacity', trk.mute ? '0.25' : '1')
-        }
-        flashEl.setAttribute('visibility', 'visible')
+      if (trk.steps[safeHead]) {
+        // active step at playhead: colored halo
+        flashEl.setAttribute('r', String(dotR(ti) + 3))
+        flashEl.setAttribute('fill', trk.color)
+        flashEl.setAttribute('stroke', 'none')
+        flashEl.setAttribute('opacity', '0.35')
       } else {
-        flashEl.setAttribute('visibility', 'hidden')
+        // inactive step at playhead: dim gray dot + colored ring
+        // (restores original ConcentricView behavior)
+        flashEl.setAttribute('r', String(dotR(ti)))
+        flashEl.setAttribute('fill', '#3a3d50')
+        flashEl.setAttribute('stroke', trk.color)
+        flashEl.setAttribute('stroke-width', '1')
+        flashEl.setAttribute('opacity', trk.mute ? '0.25' : '1')
       }
+      flashEl.setAttribute('visibility', 'visible')
     }
   }
 
