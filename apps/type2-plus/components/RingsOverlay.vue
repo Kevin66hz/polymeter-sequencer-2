@@ -94,11 +94,20 @@ function updateOverlay() {
       continue
     }
 
+    // Defensive: during a time-sig transition, the scheduler's head index
+    // and tracksRaw.current[ti].steps.length are not updated atomically.
+    // `head` may briefly outlive a shrinking pattern (e.g. head=12 while
+    // steps just dropped to length 8). Wrap via modulo to stay in bounds,
+    // mirroring the implicit trig wrap that Stage 1's dotX/dotY relied on.
+    // Without this, coords.x[head] is undefined → SVG attribute becomes
+    // NaN → needle tip snaps to (0,0), appearing to shoot outside the ring.
+    const safeHead = head >= stepsLen ? head % stepsLen : head
+
     // One cache lookup per track per frame. Both needle tip and flash
     // position share the same (headX, headY).
     const coords = getDotCoords(ti, stepsLen)
-    const headX = coords.x[head]
-    const headY = coords.y[head]
+    const headX = coords.x[safeHead]
+    const headY = coords.y[safeHead]
 
     // Update needle
     if (needleEl) {
@@ -115,7 +124,7 @@ function updateOverlay() {
       flashEl.setAttribute('cx', String(headX))
       flashEl.setAttribute('cy', String(headY))
 
-      if (trk.steps[head]) {
+      if (trk.steps[safeHead]) {
         // active step at playhead: colored halo
         flashEl.setAttribute('r', String(dotR(ti) + 3))
         flashEl.setAttribute('fill', trk.color)
