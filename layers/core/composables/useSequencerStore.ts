@@ -416,5 +416,11 @@ export function useSequencerStore() {
 
     // all mute
     allMuted, toggleAllMute,
+
+    // raw mirror for RAF loop (Plus variant overlay)
+    displayHeads,
+
+    // tracksRaw mirror for RAF loop (Plus variant overlay - geometry access)
+    tracksRaw,
   }
 }
