@@ -1,0 +1,15 @@
+{
+  "id": "bossa-nova",
+  "name": "Bossa Nova",
+  "genre": "Latin/Afro/World",
+  "bpm": 128,
+  "description": "Bossa — surdo kick on 1&3, rim-shot clave, continuous shaker.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "x.......x.......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "x..x..x...x.x...", "midiNote": 37 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "x.x.x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x.......x.x.....", "midiNote": 40 },
+    { "index": 6, "role": "PAD",   "timeSig": "4/4", "steps": "x.......x.......", "midiNote": 62 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "x.xxx.xxx.xxx.xx", "midiNote": 70 }
+  ]
+}

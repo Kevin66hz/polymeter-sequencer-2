@@ -1,0 +1,15 @@
+{
+  "id": "reggae-one-drop",
+  "name": "Reggae One Drop",
+  "genre": "Latin/Afro/World",
+  "bpm": 72,
+  "description": "Reggae one-drop — kick and rim both on beat 3, offbeat skank.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "........x.......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "........x.......", "midiNote": 37 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "..x...x...x...x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x.....x.x.......", "midiNote": 33 },
+    { "index": 6, "role": "PAD",   "timeSig": "4/4", "steps": "..x...x...x...x.", "midiNote": 64 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "..x...x...x...x.", "midiNote": 39 }
+  ]
+}

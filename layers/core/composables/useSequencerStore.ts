@@ -19,6 +19,11 @@ import { createScheduler } from '#core/scheduler/create-scheduler'
 import { TRACK_COUNT, type Pending, type Track } from '#core/types'
 import { useMidi } from './useMidi'
 import { useMidiIn } from './useMidiIn'
+// MPC-style note-repeat: deprecated in favor of scheduler-level beat-
+// repeat (see scheduler/create-scheduler.ts). Kept commented so we can
+// re-enable the timer-driven path if live overdub needs it back.
+// import { useNoteRepeat, type NoteRepeatRate } from './useNoteRepeat'
+type NoteRepeatRate = 4 | 6 | 8 | 12 | 16 | 24 | 32
 
 // ── Factory defaults (Type2 lineage) ──────────────────────────────────
 // These defaults carry the Type2 initial state. Plus reuses them as-is;
@@ -105,6 +110,18 @@ export function useSequencerStore() {
 
   const savedSnapshot = ref<TrackSnapshot[] | null>(null)
   const showMapping = ref(false)
+  // REC mode — when on AND playing, incoming unmapped MIDI notes matching
+  // a track's (midiChannel, midiNote) write at that track's currently-
+  // playing step. Off by default so MIDI IN never silently mutates
+  // patterns.
+  const recording = ref(false)
+  // Beat-repeat — while enabled, the scheduler loops the trigger step
+  // within a `round(16/repeatRate)`-step window while the real playhead
+  // continues to advance silently. Toggling off snaps trigger back to
+  // real. repeatRate = note-denominator: 4 → 1/4-note loop, 16 → 1/16,
+  // etc.
+  const repeatOn = ref(false)
+  const repeatRate = ref<NoteRepeatRate>(16)
 
   // Closure-local (not reactive): pattern snapshot used by master reset.
   let masterStepsSnapshot: boolean[][] | null = null
@@ -116,6 +133,11 @@ export function useSequencerStore() {
   const displayHeads = { current: Array(TRACK_COUNT).fill(-1) as number[] }
   const masterTargetRef = { current: null as string | null }
   const audioEnabledRef = { current: true }
+  // Beat-repeat mirrors (scheduler reads these each tick; no dep tracking).
+  const repeatOnRaw = { current: false }
+  const repeatStepsRaw = { current: 1 }  // loop length in 16th-note steps
+  const computeRepeatSteps = (rate: number) => Math.max(1, Math.round(16 / rate))
+  repeatStepsRaw.current = computeRepeatSteps(repeatRate.value)
 
   const applyFnRef: { current: ((id: number, p: Pending) => void) | null } = { current: null }
   applyFnRef.current = (id, p) => {
@@ -134,6 +156,30 @@ export function useSequencerStore() {
   }
 
   // ── MIDI (in) ───────────────────────────────────────────────────────
+  // Core REC writer. Toggle semantics: second hit at the same head
+  // clears the step (self-correcting overdub).
+  function recordNote(channel: number, note: number) {
+    if (!recording.value || !playing.value) return
+    let changed = false
+    const next = tracks.value.map((t, i) => {
+      if (t.midiChannel !== channel || t.midiNote !== note) return t
+      const head = heads.value[i]
+      if (head < 0 || head >= t.steps.length) return t
+      const wasOn = !!(t.steps[head] && t.stepsSource[head])
+      const on = !wasOn
+      if (wasOn === on) return t
+      const newSteps = t.steps.slice(); newSteps[head] = on
+      const newSource = t.stepsSource.slice(); newSource[head] = on
+      changed = true
+      return { ...t, steps: newSteps, stepsSource: newSource }
+    })
+    if (changed) tracks.value = next
+  }
+
+  // (Previous MPC-style note-repeat engine was wired here — preserved in
+  // useNoteRepeat.ts. Replaced by scheduler-level beat-repeat below.)
+  // const repeat = useNoteRepeat({ ... })
+
   const midiIn = useMidiIn({
     onPlay: () => { if (!playing.value) play() },
     onStop: () => { if (playing.value) stop() },
@@ -147,6 +193,12 @@ export function useSequencerStore() {
       }
       else if (controlId === 'master_apply' && rawValue > 63) { commitMaster() }
     },
+    // Manual pad press: toggle-record the corresponding step.
+    onNoteIn: (channel, note, _velocity) => {
+      recordNote(channel, note)
+    },
+    // onNoteOff is available but not wired; beat-repeat is scheduler-
+    // driven and doesn't care about pad release.
   })
 
   // External clock → BPM sync
@@ -160,6 +212,8 @@ export function useSequencerStore() {
   watch(tracks, v => { tracksRaw.current = v.map(t => ({ ...t, steps: [...t.steps] })) }, { deep: true })
   watch(pendQ, v => { pendingRaw.current = v.map(q => q.map(p => ({ ...p }))) }, { deep: true })
   watch(masterTarget, v => { masterTargetRef.current = v })
+  watch(repeatOn, v => { repeatOnRaw.current = v })
+  watch(repeatRate, v => { repeatStepsRaw.current = computeRepeatSteps(v) })
 
   // ── Scheduler lifecycle ─────────────────────────────────────────────
   let scheduler: ReturnType<typeof createScheduler> | null = null
@@ -185,6 +239,8 @@ export function useSequencerStore() {
     scheduler = createScheduler({
       bpmRaw, tracksRaw, pendingRaw, displayHeads,
       applyFnRef, midiFireRef, audioEnabledRef, masterTargetRef,
+      repeatOnRef: repeatOnRaw,
+      repeatStepsRef: repeatStepsRaw,
       onHeadsTick: h => { heads.value = h },
       onMasterReset: () => handleMasterReset(),
     })
@@ -372,10 +428,23 @@ export function useSequencerStore() {
   function hasBound(id: string) { return !!midiIn.getMappingFor(id) }
 
   // ── All mute ────────────────────────────────────────────────────────
-  const allMuted = computed(() => tracks.value.every(t => t.mute))
+  // Solo-aware: when any track is soloed, ALL MUTE never touches those
+  // tracks. Rationale: SOLO is an explicit "keep audible" flag, so a
+  // subsequent ALL MUTE shouldn't silence it. Toggle state reflects
+  // "every non-solo track is muted" so the button highlight tracks the
+  // user's intent even with solos mixed in.
+  const allMuted = computed(() => {
+    const pool = tracks.value.filter(t => !t.solo)
+    return pool.length > 0 && pool.every(t => t.mute)
+  })
   function toggleAllMute() {
     const mute = !allMuted.value
-    tracks.value = tracks.value.map(t => ({ ...t, mute }))
+    tracks.value = tracks.value.map(t => ({
+      ...t,
+      // Soloed tracks are force-audible when engaging ALL MUTE. When
+      // disengaging (mute=false), everyone unmutes uniformly.
+      mute: t.solo ? (mute ? false : t.mute) : mute,
+    }))
   }
 
   return {
@@ -385,7 +454,7 @@ export function useSequencerStore() {
     // reactive state
     bpm, playing, tracks, heads, pendQ, selectedId, detailId, audioOn,
     masterNum, masterDen, masterMode, masterBridgeBars, masterTarget, flash,
-    savedSnapshot, showMapping,
+    savedSnapshot, showMapping, recording, repeatOn, repeatRate,
 
     // composables passed through
     midi, midiIn,

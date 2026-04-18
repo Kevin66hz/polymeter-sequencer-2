@@ -27,6 +27,13 @@ export type SchedulerDeps = {
   masterTargetRef: { current: string | null }
   onHeadsTick: (heads: number[]) => void
   onMasterReset: () => void
+  // Optional: beat-repeat. While `repeatOnRef.current` is true, the
+  // trigger step loops inside a `repeatStepsRef.current`-long window
+  // (aligned to that length) while the real playhead keeps advancing
+  // silently underneath. Toggling off snaps the trigger back to the
+  // real playhead — DJ-style beat roll.
+  repeatOnRef?: { current: boolean }
+  repeatStepsRef?: { current: number }
   // Optional: swap in a different audio engine (sampled, FM, whatever).
   audioAdapter?: AudioAdapter
   // Optional: plugin array (synchronous transform hook). Reserved for Phase 6.
@@ -44,9 +51,36 @@ export function createScheduler(deps: SchedulerDeps) {
   let ctx: AudioContext | null = null
   let intervalId: ReturnType<typeof setInterval> | null = null
   let rafId: number | null = null
-  let trackState: { step: number; nextTime: number }[] = []
+  // `step` is the REAL playhead — it always advances one step per tick
+  // regardless of beat-repeat. `repeatLoopStart` is the origin of the
+  // trigger-side loop while REP is on; null means "mirror the real
+  // playhead" (REP off or not yet engaged).
+  let trackState: {
+    step: number
+    nextTime: number
+    repeatLoopStart: number | null
+  }[] = []
   let running = false
   let masterResetArmed = false
+
+  // Given the real step, the loop origin, the requested loop length and
+  // the track length, return which step should actually TRIGGER. When
+  // REP is off this function is not called — we trigger the real step
+  // directly. When REP is on, the formula maps the monotonically-
+  // advancing real step into a cyclic window [loopStart, loopStart +
+  // effLen) where effLen clamps to the track length. That way polymeter
+  // tracks shorter than the requested loop still produce a sane loop.
+  const computeTriggerStep = (
+    realStep: number,
+    loopStart: number,
+    loopLen: number,
+    trackLen: number,
+  ): number => {
+    const effLen = Math.max(1, Math.min(loopLen, trackLen - loopStart))
+    let offset = realStep - loopStart
+    if (offset < 0) offset += trackLen
+    return loopStart + (offset % effLen)
+  }
 
   const sched = (id: number, si: number, time: number) => {
     const trk = tracksRaw.current[id]
@@ -81,6 +115,12 @@ export function createScheduler(deps: SchedulerDeps) {
     const now = ctx.currentTime
     const ah = 0.1
 
+    // Snapshot REP state at tick start. Reading `.current` directly on
+    // every iteration would be fine too; tick boundary is convenient and
+    // lets the loop observe the same state for all 16 tracks in one pass.
+    const repeatOn = !!deps.repeatOnRef?.current
+    const repeatLen = Math.max(1, deps.repeatStepsRef?.current ?? 1)
+
     for (let i = 0; i < TRACK_COUNT; i++) {
       const trk = tracksRaw.current[i]
       if (!trk) continue
@@ -89,15 +129,35 @@ export function createScheduler(deps: SchedulerDeps) {
 
       if (trackState[i].step >= len) trackState[i].step = 0
 
+      // REP lifecycle per track: engage by aligning to the rate grid,
+      // disengage by clearing so the next sched() fires the real step.
+      if (repeatOn && trackState[i].repeatLoopStart == null) {
+        const s = trackState[i].step
+        trackState[i].repeatLoopStart = s - (s % repeatLen)
+      } else if (!repeatOn && trackState[i].repeatLoopStart != null) {
+        trackState[i].repeatLoopStart = null
+      }
+
       while (trackState[i].nextTime < now + ah) {
-        const si = trackState[i].step
-        sched(i, si, trackState[i].nextTime)
+        const realSi = trackState[i].step
+        const triggerSi = repeatOn && trackState[i].repeatLoopStart != null
+          ? computeTriggerStep(realSi, trackState[i].repeatLoopStart!, repeatLen, len)
+          : realSi
+
+        // Fire using the trigger step — that's what the user hears and
+        // what the UI highlights. The real step keeps marching below.
+        sched(i, triggerSi, trackState[i].nextTime)
         trackState[i].nextTime += dur
 
-        const nextStep = (si + 1) % len
-        trackState[i].step = nextStep
+        const nextReal = (realSi + 1) % len
+        trackState[i].step = nextReal
 
-        if (nextStep === 0) {
+        // Bar boundaries / meter-pending / master convergence all key off
+        // the REAL playhead — REP is a trigger-only effect and should
+        // never block meter transitions from advancing. If we hid these
+        // behind triggerSi, a held REP would stall the whole transition
+        // machinery, which is exactly not what we want.
+        if (nextReal === 0) {
           const q = pendingRaw.current[i]
           if (q && q.length > 0) {
             const p = q.shift()!
@@ -116,6 +176,9 @@ export function createScheduler(deps: SchedulerDeps) {
             for (let j = 0; j < TRACK_COUNT; j++) {
               trackState[j].step = 0
               trackState[j].nextTime = downbeat
+              // Master reset also clears any REP loop origin — the new
+              // downbeat starts a fresh alignment on next tick.
+              trackState[j].repeatLoopStart = null
             }
             setTimeout(() => { onMasterReset() }, 0)
           }
@@ -144,7 +207,7 @@ export function createScheduler(deps: SchedulerDeps) {
     if (!ctx) ctx = new AudioContext()
     if (ctx.state === 'suspended') ctx.resume()
     const now = ctx.currentTime
-    trackState = tracksRaw.current.map(() => ({ step: 0, nextTime: now + 0.05 }))
+    trackState = tracksRaw.current.map(() => ({ step: 0, nextTime: now + 0.05, repeatLoopStart: null }))
     displayHeads.current = Array(TRACK_COUNT).fill(0)
     masterResetArmed = false
     running = true

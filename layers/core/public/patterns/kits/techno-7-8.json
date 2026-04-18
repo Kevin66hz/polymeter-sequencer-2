@@ -1,0 +1,16 @@
+{
+  "id": "techno-7-8",
+  "name": "Techno 7/8 Poly",
+  "genre": "House/Techno",
+  "bpm": 132,
+  "description": "Polymeter techno — kick in 4/4 under a 7/8 snare and 11/8 perc. Lets the rings drift.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4",  "steps": "x...x...x...x...", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "7/8",  "steps": "....x....x....", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4",  "steps": "..x...x...x...x.", "midiNote": 42 },
+    { "index": 3, "role": "CLAP",  "timeSig": "5/8",  "steps": "....x.....", "midiNote": 39 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4",  "steps": "x.x.x.x.x.x.x.x.", "midiNote": 36 },
+    { "index": 7, "role": "PERC",  "timeSig": "11/8", "steps": "x....x....x....x....x.", "midiNote": 56 },
+    { "index": 15, "role": "PC2",  "timeSig": "9/8",  "steps": "x..x..x..x..x..x..", "midiNote": 54 }
+  ]
+}

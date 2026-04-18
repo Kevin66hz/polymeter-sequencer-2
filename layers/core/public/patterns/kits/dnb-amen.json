@@ -1,0 +1,15 @@
+{
+  "id": "dnb-amen",
+  "name": "D'n'B Amen-ish",
+  "genre": "House/Techno",
+  "bpm": 172,
+  "description": "Drum'n'bass — chopped Amen-style break feel. Fast, syncopated.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "x..x.....x......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "....x....x..x..x", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "x.x.x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x.......x.x.....", "midiNote": 33 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "...x.......x....", "midiNote": 56 },
+    { "index": 10, "role": "HH2",  "timeSig": "4/4", "steps": ".......x........", "midiNote": 46 }
+  ]
+}

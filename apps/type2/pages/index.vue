@@ -7,7 +7,7 @@
 //
 // The store is auto-imported via the core layer extended in nuxt.config.ts.
 
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 // Components are auto-imported by Nuxt:
 //   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
 //   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
@@ -19,7 +19,7 @@ const {
   NUM_OPTS, DEN_OPTS,
   bpm, playing, tracks, heads, pendQ, selectedId, detailId, audioOn,
   masterNum, masterDen, masterMode, masterBridgeBars, masterTarget,
-  savedSnapshot, showMapping,
+  savedSnapshot, showMapping, recording, repeatOn, repeatRate,
   midi, midiIn,
   play, stop,
   saveSnapshot, recallSnapshot,
@@ -34,11 +34,65 @@ const {
   allMuted, toggleAllMute,
 } = useSequencerStore()
 
+// ── Pattern presets (genre drum patterns) ───────────────────────────────
+// Bundled under /patterns/index.json via the core layer's public/ dir.
+//   • top-bar PresetMenu  -> whole-kit preset
+//   • per-cell ▾ button   -> role-matched per-track score
+const {
+  index: presetIndex,
+  loading: presetLoading,
+  lastAppliedKitId,
+  lastAppliedKitName,
+  lastAppliedLineByTrack,
+  stagedKit,
+  loadIndex: loadPresetIndex,
+  stageKit,
+  applyLineToTrack,
+  serializeCurrentAsKit,
+  stageKitFromJson,
+  applyStagedKit,
+  clearStagedKit,
+} = usePatternPresets({
+  tracks, pendQ, bpm,
+  // Respect external MIDI clock — don't let a preset stomp a slaved BPM.
+  isBpmLocked: () => midiIn.state.syncMode === 'external',
+  // Transition-aware apply: bridges into per-track target meters.
+  masterMode, masterBridgeBars, playing,
+})
+
+// Beat-repeat rate cycle: 1/2 → 1/4 → 1/8 → 1/16 → loop.
+const REPEAT_RATES = [2, 4, 8, 16] as const
+function cycleRepeatRate() {
+  const i = REPEAT_RATES.indexOf(repeatRate.value as any)
+  ;(repeatRate as any).value = REPEAT_RATES[(i < 0 ? 0 : i + 1) % REPEAT_RATES.length]
+}
+
+// Head-truncate MIDI device names so long port strings don't blow the row.
+function truncDeviceName(name: string | undefined | null, max = 12): string {
+  if (!name) return ''
+  return name.length > max ? name.slice(0, max) + '…' : name
+}
+
+// Unified APPLY click dispatcher. Priority:
+//   1. masterTarget in flight → disabled (no-op; button shows ⟳)
+//   2. staged kit → commit the kit (transition-aware internally)
+//   3. else → commit master N/D (existing behavior)
+function onApplyClick() {
+  if (masterTarget.value) return
+  if (stagedKit.value) { applyStagedKit(); return }
+  commitMaster()
+}
+
 // ── UI-local state (not shared across UI variants) ──────────────────
 type ViewMode = 'grid' | 'concentric'
 const viewMode = ref<ViewMode>('grid')
 const showBpmOverlay = ref(false)
 const midiConfigInput = ref<HTMLInputElement | null>(null)
+const kitFileInput = ref<HTMLInputElement | null>(null)
+// Kit SAVE popover (non-blocking; window.prompt() stalls the scheduler tick).
+const showKitSave = ref(false)
+const kitSaveName = ref('My Kit')
+const kitSaveInput = ref<HTMLInputElement | null>(null)
 
 // ── Global keybind: Space = play/stop (skip when typing in fields) ──
 function onGlobalKeyDown(e: KeyboardEvent) {
@@ -53,9 +107,29 @@ function onGlobalKeyDown(e: KeyboardEvent) {
 onMounted(() => { window.addEventListener('keydown', onGlobalKeyDown) })
 onBeforeUnmount(() => { window.removeEventListener('keydown', onGlobalKeyDown) })
 
-// ── MIDI config download / upload (needs DOM refs, so stays in page) ─
+// ── MIDI config download / upload ───────────────────────────────────
+// Combined file: MIDI IN mappings + syncMode AND per-track MIDI OUT
+// (ch/note/vel/gate). Steps / time signatures are untouched — use KIT
+// SAVE/LOAD for those. Backward compatible with older files.
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n))
+}
 function downloadMidiConfig() {
-  const blob = new Blob([midiIn.saveMappings()], { type: 'application/json' })
+  const data = {
+    type: 'midi-config',
+    version: 2,
+    mappings: midiIn.state.mappings.map(m => ({ ...m })),
+    syncMode: midiIn.state.syncMode,
+    tracks: tracks.value.map((t, i) => ({
+      index: i,
+      name: t.name,
+      midiChannel: t.midiChannel,
+      midiNote: t.midiNote,
+      midiVelocity: t.midiVelocity,
+      gateMs: t.gateMs,
+    })),
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob); const a = document.createElement('a')
   a.href = url; a.download = 'midi-config.json'; a.click(); URL.revokeObjectURL(url)
 }
@@ -63,7 +137,61 @@ function triggerLoadMidiConfig() { midiConfigInput.value?.click() }
 function onMidiConfigLoaded(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]; if (!file) return
   const reader = new FileReader()
-  reader.onload = evt => midiIn.loadMappings(evt.target?.result as string)
+  reader.onload = evt => {
+    const text = evt.target?.result as string
+    midiIn.loadMappings(text)
+    try {
+      const data = JSON.parse(text)
+      if (!Array.isArray(data.tracks)) return
+      const byIndex = new Map<number, any>()
+      for (const e of data.tracks) {
+        if (typeof e?.index === 'number') byIndex.set(e.index, e)
+      }
+      tracks.value = tracks.value.map((t, i) => {
+        const src = byIndex.get(i); if (!src) return t
+        return {
+          ...t,
+          ...(typeof src.midiChannel  === 'number' ? { midiChannel:  clamp(src.midiChannel | 0, 1, 16) }   : {}),
+          ...(typeof src.midiNote     === 'number' ? { midiNote:     clamp(src.midiNote    | 0, 0, 127) } : {}),
+          ...(typeof src.midiVelocity === 'number' ? { midiVelocity: clamp(src.midiVelocity| 0, 1, 127) } : {}),
+          ...(typeof src.gateMs       === 'number' ? { gateMs:       clamp(src.gateMs      | 0, 10, 500) } : {}),
+        }
+      })
+    } catch { /* already logged by midiIn.loadMappings */ }
+  }
+  reader.readAsText(file); (e.target as HTMLInputElement).value = ''
+}
+
+// ── Pattern kit SAVE / LOAD (current 16-track state ↔ JSON file) ───────
+// SAVE opens a non-blocking popover so playback keeps ticking. A
+// `window.prompt()` here would stall the look-ahead scheduler and cause
+// audible gaps or a full stop — see README "implementation rules".
+async function openKitSave() {
+  showKitSave.value = true
+  await nextTick()
+  kitSaveInput.value?.focus()
+  kitSaveInput.value?.select()
+}
+function doKitSave() {
+  const name = (kitSaveName.value || 'My Kit').trim()
+  const json = serializeCurrentAsKit(name, 'Custom')
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob); const a = document.createElement('a')
+  const safe = name.replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'kit'
+  a.href = url; a.download = `${safe}.json`; a.click(); URL.revokeObjectURL(url)
+  showKitSave.value = false
+}
+function triggerLoadKit() { kitFileInput.value?.click() }
+function onKitFileLoaded(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]; if (!file) return
+  const reader = new FileReader()
+  reader.onload = evt => {
+    // LOAD stages the kit — user confirms with APPLY next to the LOAD
+    // button. This lets transition mode fire correctly and gives the user
+    // a chance to see what kit will be applied before committing.
+    const ok = stageKitFromJson(evt.target?.result as string)
+    if (!ok) window.alert('Failed to load kit — invalid JSON or missing tracks[].')
+  }
   reader.readAsText(file); (e.target as HTMLInputElement).value = ''
 }
 </script>
@@ -108,6 +236,59 @@ function onMidiConfigLoaded(e: Event) {
         <!-- ── 行1: リズム・再生系 ── -->
         <div class="flex items-center gap-2 px-3 py-[6px] border-b border-[#161616] flex-shrink-0 flex-wrap">
 
+          <!-- KIT group: PRESET ▾ / SAVE / LOAD.
+               Clicking PRESET or LOAD stages a kit; commit via the shared
+               APPLY button in the MASTER group to the right (which is
+               transition-aware when masterMode='transition'). -->
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class="text-[9px] text-[#444] tracking-[1px]">KIT</span>
+            <PresetMenu
+              :index="presetIndex"
+              :loading="presetLoading"
+              :last-applied-kit-id="lastAppliedKitId"
+              :last-applied-kit-name="lastAppliedKitName"
+              @open="loadPresetIndex"
+              @apply-kit="(k) => stageKit(k)" />
+            <!-- SAVE current tracks as a kit JSON (non-blocking popover) -->
+            <div class="relative z-[15] flex-shrink-0">
+              <button
+                class="text-[9px] px-2 py-1 border rounded-sm hover:text-[#ccc] tracking-[1px]"
+                :class="showKitSave
+                  ? 'border-[#555] bg-[#1e1e1e] text-[#ddd]'
+                  : 'border-[#333] bg-transparent text-[#666]'"
+                title="Download current 16 tracks as a kit JSON"
+                @click.stop="showKitSave ? (showKitSave = false) : openKitSave()">SAVE</button>
+              <div v-if="showKitSave" class="fixed inset-0 z-[98]" @click="showKitSave=false" />
+              <div v-if="showKitSave"
+                class="absolute top-full left-0 mt-1 z-[99] bg-[#111] border border-[#333] rounded-sm px-2 py-1.5 flex items-center gap-1.5 shadow-xl"
+                @click.stop>
+                <span class="text-[8px] tracking-[2px] text-[#555]">NAME</span>
+                <input
+                  ref="kitSaveInput"
+                  v-model="kitSaveName"
+                  type="text"
+                  class="bg-[#0a0a0a] text-[#ddd] text-[10px] px-1.5 py-[2px] border border-[#2a2a2a] rounded-sm w-[140px]"
+                  @keydown.enter.prevent="doKitSave"
+                  @keydown.esc.prevent="showKitSave=false" />
+                <button
+                  class="text-[9px] px-2 py-[3px] border border-[#336633] bg-[#182818] text-[#88cc88] rounded-sm tracking-[1px]"
+                  @click="doKitSave">↓ SAVE</button>
+                <button
+                  class="text-[9px] text-[#555] hover:text-[#ccc] leading-none px-1"
+                  @click="showKitSave=false">✕</button>
+              </div>
+            </div>
+            <!-- LOAD a kit JSON — stages it for the shared APPLY button -->
+            <button
+              class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc] tracking-[1px]"
+              title="Load a kit JSON (commit via APPLY)"
+              @click="triggerLoadKit">LOAD</button>
+            <input ref="kitFileInput" type="file" accept=".json,application/json" style="display:none" @change="onKitFileLoaded" />
+          </div>
+
+          <!-- 縦区切り -->
+          <div class="w-px self-stretch bg-[#222] my-0.5 flex-shrink-0" />
+
           <!-- INST / TRANS -->
           <div class="flex gap-0.5 rounded-sm overflow-hidden border border-[#222] flex-shrink-0">
             <button class="text-[10px] px-2 py-1"
@@ -128,15 +309,37 @@ function onMidiConfigLoaded(e: Event) {
               @click="masterBridgeBars=b">{{ b }}</button>
           </div>
 
-          <!-- APPLY -->
-          <div class="w-[76px] flex-shrink-0"
-            :style="{ visibility: (masterMode==='transition' || masterTarget) ? 'visible' : 'hidden' }">
+          <!-- APPLY (unified: in-flight master transition > staged kit >
+               plain master commit). Visible when any of those states hold.
+               Adjacent ✕ cancels staged kit without running APPLY. -->
+          <div class="flex items-center gap-1 flex-shrink-0"
+            :style="{ visibility: (masterMode==='transition' || masterTarget || stagedKit) ? 'visible' : 'hidden' }">
             <div class="relative z-[6]">
               <button
-                class="w-full py-[5px] text-[10px] border rounded-sm tracking-[1px] text-center"
-                :class="masterTarget ? 'bg-[#2a1a0a] text-[#ff9944] border-[#ff660066]' : 'bg-[#1a2230] text-[#8faacc] border-[#2a4060] hover:text-[#bcd]'"
-                :disabled="!!masterTarget" @click="commitMaster">
-                {{ masterTarget ? `⟳ ${masterTarget}` : 'APPLY' }}
+                class="py-[5px] px-2 text-[10px] border rounded-sm tracking-[1px] flex items-center gap-1 min-w-[76px] justify-center"
+                :class="
+                  masterTarget
+                    ? 'bg-[#2a1a0a] text-[#ff9944] border-[#ff660066] cursor-not-allowed'
+                    : stagedKit
+                      ? (masterMode === 'transition'
+                          ? 'bg-[#2a1a0a] text-[#ff9944] border-[#ff660066] hover:text-[#ffb066]'
+                          : 'bg-[#182818] text-[#88cc88] border-[#336633] hover:text-[#bfefbf]')
+                      : 'bg-[#1a2230] text-[#8faacc] border-[#2a4060] hover:text-[#bcd]'"
+                :disabled="!!masterTarget"
+                :title="masterTarget
+                  ? `Master transition in flight → ${masterTarget}`
+                  : stagedKit
+                    ? `Apply staged kit: ${stagedKit.name}${masterMode === 'transition' ? ' (transition)' : ''}`
+                    : 'Commit master N/D'"
+                @click="onApplyClick">
+                <template v-if="masterTarget">⟳ {{ masterTarget }}</template>
+                <template v-else-if="stagedKit">
+                  <span>{{ masterMode === 'transition' ? '∿' : '⏎' }} APPLY</span>
+                  <span class="text-[#aaa] text-[9px]">
+                    {{ stagedKit.name.length > 4 ? stagedKit.name.slice(0, 4) + '…' : stagedKit.name }}
+                  </span>
+                </template>
+                <template v-else>APPLY</template>
               </button>
               <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-sm"
                 :class="isLearning('master_apply') ? 'bg-orange-500/70 animate-pulse' : hasBound('master_apply') ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
@@ -144,6 +347,11 @@ function onMidiConfigLoaded(e: Event) {
                 <span class="text-[7px] text-white leading-none">{{ isLearning('master_apply') ? '●' : bindingLabel('master_apply') }}</span>
               </div>
             </div>
+            <!-- Cancel staged kit — only meaningful while a kit is staged -->
+            <button v-if="stagedKit"
+              class="text-[10px] px-1.5 py-[4px] border border-[#333] bg-transparent text-[#555] rounded-sm hover:text-[#ccc] leading-none"
+              title="Cancel staged kit"
+              @click="clearStagedKit">✕</button>
           </div>
 
           <!-- 縦区切り -->
@@ -165,26 +373,35 @@ function onMidiConfigLoaded(e: Event) {
               @click="savedSnapshot = null">✕</button>
           </div>
 
-          <!-- 縦区切り -->
-          <div class="w-px self-stretch bg-[#222] my-0.5 flex-shrink-0" />
-
-          <!-- ALL MUTE -->
-          <div class="flex items-center gap-1 flex-shrink-0">
-            <span class="text-[9px] text-[#444] tracking-[1px]">MUTE</span>
-            <button
-              class="text-[10px] px-2 py-[4px] border rounded-sm tracking-[1px]"
-              :class="allMuted ? 'bg-[#2a1a1a] text-[#dd8888] border-[#664444]' : 'bg-transparent text-[#555] border-[#222] hover:text-[#aaa]'"
-              @click="toggleAllMute">⊘ ALL M</button>
-          </div>
-
           <!-- ml-auto: 右寄せ -->
           <div class="ml-auto flex items-center gap-2 flex-shrink-0">
 
-            <!-- BPM ボタン + オーバーレイ -->
+            <!-- INT / SYNC toggle — moved from row 2, left of BPM. Only
+                 visible when MIDI IN is selected (clock needs a source). -->
+            <div v-if="midiIn.state.selectedId"
+              class="flex gap-0.5 rounded-sm overflow-hidden border border-[#222] flex-shrink-0">
+              <button class="text-[9px] px-1.5 py-1"
+                :class="midiIn.state.syncMode==='internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
+                @click="midiIn.state.syncMode='internal'">INT</button>
+              <button class="text-[9px] px-1.5 py-1"
+                :class="midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
+                @click="midiIn.state.syncMode='external'">SYNC</button>
+            </div>
+
+            <!-- BPM ボタン + オーバーレイ. When SYNC is engaged, the value
+                 shown is the externally-clocked BPM (synced via the store
+                 watcher); coloring it green communicates the override. -->
             <div class="relative z-[10] flex-shrink-0">
               <button
                 class="text-[11px] border px-2 py-[4px] rounded-sm tabular-nums"
-                :class="showBpmOverlay ? 'text-[#ddd] border-[#555] bg-[#1e1e1e]' : 'text-[#888] border-[#222] bg-transparent hover:text-[#ccc]'"
+                :class="showBpmOverlay
+                  ? 'text-[#ddd] border-[#555] bg-[#1e1e1e]'
+                  : midiIn.state.syncMode === 'external' && midiIn.state.selectedId
+                    ? 'text-[#8fccaa] border-[#2f5f3f] bg-[#0e1812] hover:text-[#bfefcf]'
+                    : 'text-[#888] border-[#222] bg-transparent hover:text-[#ccc]'"
+                :title="midiIn.state.syncMode === 'external' && midiIn.state.selectedId
+                  ? `SYNC — BPM driven by external clock (${midiIn.state.syncBpm ?? '…'})`
+                  : 'BPM'"
                 @click.stop="showBpmOverlay = !showBpmOverlay">
                 BPM <span class="font-bold">{{ bpm }}</span> ▾
               </button>
@@ -209,22 +426,32 @@ function onMidiConfigLoaded(e: Event) {
               </div>
             </div>
 
-            <!-- AUDIO ON/OFF (グローバル) -->
+            <!-- AUDIO ON/OFF — icon only -->
             <button
-              class="border px-[8px] py-[4px] text-[11px] tracking-[1px] rounded-sm flex-shrink-0"
+              class="border w-[26px] h-[24px] flex items-center justify-center text-[13px] rounded-sm flex-shrink-0 leading-none"
               :class="audioOn
                 ? 'bg-[#1a2a1a] text-[#8fd08f] border-[#2f5f2f]'
                 : 'bg-[#222] text-[#666] border-[#333]'"
-              :title="audioOn ? 'MIDI ON — click to silence' : 'MIDI OFF — click to send'"
-              @click="audioOn = !audioOn">
-              {{ audioOn ? '♪ AUDIO' : '✕ AUDIO' }}
-            </button>
+              :title="audioOn ? 'AUDIO ON — click to silence' : 'AUDIO OFF — click to send'"
+              @click="audioOn = !audioOn">{{ audioOn ? '♪' : '✕' }}</button>
 
-            <!-- PLAY / STOP -->
+            <!-- REC — transport modifier, sits left of PLAY -->
+            <button
+              class="border w-[26px] h-[24px] flex items-center justify-center text-[13px] rounded-sm flex-shrink-0 leading-none"
+              :class="recording
+                ? 'bg-[#2a1010] text-[#ff4040] border-[#aa2020] animate-pulse'
+                : 'bg-transparent text-[#555] border-[#333] hover:text-[#aaa]'"
+              :title="recording
+                ? 'REC armed — click to disarm. Incoming notes write steps at playhead.'
+                : 'REC disarmed — click to arm. Requires MIDI IN + PLAY.'"
+              @click="recording = !recording">●</button>
+
+            <!-- PLAY / STOP — icon only -->
             <div class="relative z-[6] flex-shrink-0">
-              <button class="border-0 px-[14px] py-[5px] text-[11px] tracking-[2px]"
+              <button class="border-0 w-[32px] h-[24px] flex items-center justify-center text-[13px] leading-none"
                 :class="playing ? 'bg-[#c03030] text-[#ffaaaa]' : 'bg-[#206020] text-[#aaffaa]'"
-                @click="playing ? stop() : play()">{{ playing ? '■ STOP' : '▶ PLAY' }}</button>
+                :title="playing ? 'STOP (Space)' : 'PLAY (Space)'"
+                @click="playing ? stop() : play()">{{ playing ? '■' : '▶' }}</button>
               <div v-if="showMapping" class="absolute inset-0 flex gap-px">
                 <div class="flex-1 cursor-pointer flex items-center justify-center text-[7px] text-white"
                   :class="isLearning('transport_play') ? 'bg-orange-500/80 animate-pulse' : hasBound('transport_play') ? 'bg-blue-500/50' : 'bg-white/10 hover:bg-white/25'"
@@ -262,7 +489,7 @@ function onMidiConfigLoaded(e: Event) {
               :disabled="!midi.supported.value"
               @change="midi.selectOutput(($event.target as HTMLSelectElement).value || null)">
               <option value="">{{ midi.supported.value ? (midi.outputs.value.length ? '— none —' : '— no device —') : 'unsupported' }}</option>
-              <option v-for="o in midi.outputs.value" :key="o.id" :value="o.id">{{ o.name }}</option>
+              <option v-for="o in midi.outputs.value" :key="o.id" :value="o.id" :title="o.name">{{ truncDeviceName(o.name) }}</option>
             </select>
           </div>
 
@@ -273,31 +500,67 @@ function onMidiConfigLoaded(e: Event) {
               class="bg-[#111] text-[#ccc] border border-[#222] text-[10px] py-[2px] px-[4px] min-w-[120px]"
               @change="(e) => midiIn.selectInput((e.target as HTMLSelectElement).value || null)">
               <option value="">— none —</option>
-              <option v-for="o in midiIn.state.inputs" :key="o.id" :value="o.id">{{ o.name }}</option>
+              <option v-for="o in midiIn.state.inputs" :key="o.id" :value="o.id" :title="o.name">{{ truncDeviceName(o.name) }}</option>
             </select>
             <span v-else class="text-[10px] text-[#555]">unsupported</span>
           </div>
 
-          <!-- Clock sync -->
-          <div v-if="midiIn.state.selectedId" class="flex gap-0.5 rounded-sm overflow-hidden border border-[#222]">
-            <button class="text-[9px] px-1.5 py-1"
-              :class="midiIn.state.syncMode==='internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555]'"
-              @click="midiIn.state.syncMode='internal'">INT</button>
-            <button class="text-[9px] px-1.5 py-1"
-              :class="midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555]'"
-              @click="midiIn.state.syncMode='external'">SYNC</button>
-            <span v-if="midiIn.state.syncMode==='external' && midiIn.state.syncBpm"
-              class="text-[9px] px-1.5 text-[#8fccaa]">{{ midiIn.state.syncBpm }}</span>
+          <!-- Clock sync moved to row 1 (left of BPM). -->
+
+          <!-- MAPPING toggle — only visible with MIDI IN selected -->
+          <div v-if="midiIn.state.selectedId" class="flex items-center gap-1">
+            <button class="text-[9px] px-2 py-1 border rounded-sm flex items-center gap-1"
+              :class="showMapping ? 'bg-[#2a2a2a] text-[#ddd] border-[#555]' : 'bg-transparent text-[#666] border-[#333]'"
+              @click="showMapping=!showMapping">
+              <span>MAP</span>
+              <span class="text-[8px] px-1 rounded-sm tabular-nums"
+                :class="midiIn.state.mappings.length > 0 ? 'bg-[#182818] text-[#88cc88]' : 'bg-[#1a1a1a] text-[#555]'">
+                {{ midiIn.state.mappings.length }}
+              </span>
+            </button>
           </div>
 
-          <!-- Mapping -->
-          <div v-if="midiIn.state.selectedId" class="flex items-center gap-1">
-            <button class="text-[9px] px-2 py-1 border rounded-sm"
-              :class="showMapping ? 'bg-[#2a2a2a] text-[#ddd] border-[#555]' : 'bg-transparent text-[#666] border-[#333]'"
-              @click="showMapping=!showMapping">MAPPING</button>
-            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]" @click="downloadMidiConfig">SAVE</button>
-            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]" @click="triggerLoadMidiConfig">LOAD</button>
+          <!-- MIDI SAVE / LOAD — always available. Stores MIDI IN mappings
+               + syncMode AND per-track MIDI OUT ch/note/vel/gate. -->
+          <div class="flex items-center gap-1">
+            <span class="text-[10px] text-[#444]">MIDI</span>
+            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
+              title="Save MIDI mappings + per-track channel config"
+              @click="downloadMidiConfig">SAVE</button>
+            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
+              title="Load MIDI mappings + per-track channel config"
+              @click="triggerLoadMidiConfig">LOAD</button>
             <input ref="midiConfigInput" type="file" accept=".json" style="display:none" @change="onMidiConfigLoaded" />
+          </div>
+
+          <!-- REP + rate — note repeat just left of ALL MUTE -->
+          <div class="ml-auto flex items-center gap-1 flex-shrink-0">
+            <span class="text-[9px] text-[#444] tracking-[1px]">REP</span>
+            <button
+              class="border w-[26px] h-[24px] flex items-center justify-center text-[13px] rounded-sm leading-none"
+              :class="repeatOn
+                ? 'bg-[#0e1a2a] text-[#4aa0ff] border-[#2060aa]'
+                : 'bg-transparent text-[#555] border-[#333] hover:text-[#aaa]'"
+              :title="repeatOn
+                ? 'Note Repeat ON — hold a pad to auto-fire at 1/' + repeatRate
+                : 'Note Repeat OFF'"
+              @click="repeatOn = !repeatOn">⟳</button>
+            <button
+              class="border h-[24px] px-1.5 flex items-center justify-center text-[9px] rounded-sm leading-none tabular-nums"
+              :class="repeatOn
+                ? 'bg-[#0e1a2a] text-[#88bbff] border-[#2060aa]'
+                : 'bg-transparent text-[#555] border-[#333] hover:text-[#aaa]'"
+              title="Click to cycle rate (1/2 → 1/4 → 1/8 → 1/16)"
+              @click="cycleRepeatRate">1/{{ repeatRate }}</button>
+          </div>
+
+          <!-- ALL MUTE — right edge; solo-aware in the store -->
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class="text-[9px] text-[#444] tracking-[1px]">MUTE</span>
+            <button
+              class="text-[10px] px-2 py-[4px] border rounded-sm tracking-[1px]"
+              :class="allMuted ? 'bg-[#2a1a1a] text-[#dd8888] border-[#664444]' : 'bg-transparent text-[#555] border-[#222] hover:text-[#aaa]'"
+              @click="toggleAllMute">⊘ ALL M</button>
           </div>
 
         </div>
@@ -326,9 +589,19 @@ function onMidiConfigLoaded(e: Event) {
 
             <!-- Top row: name + knobs (size 28) -->
             <div class="flex items-center justify-between flex-shrink-0">
-              <span class="text-[8px] tracking-[1px] font-semibold truncate"
-                :style="{ color: trk.color }">
-                {{ audioOn ? trk.name : `${trk.midiChannel}-${trk.midiNote}` }}</span>
+              <div class="flex items-center gap-1 min-w-0" @click.stop>
+                <span class="text-[8px] tracking-[1px] font-semibold truncate"
+                  :style="{ color: trk.color }">
+                  {{ audioOn ? trk.name : `${trk.midiChannel}-${trk.midiNote}` }}</span>
+                <PatternPicker
+                  :index="presetIndex"
+                  :loading="presetLoading"
+                  :track-name="trk.name"
+                  :track-color="trk.color"
+                  :last-applied-line-id="lastAppliedLineByTrack[trk.id] ?? null"
+                  @open="loadPresetIndex"
+                  @apply-line="(l) => applyLineToTrack(trk.id, l)" />
+              </div>
               <div class="flex items-center gap-0.5 relative" @click.stop>
                 <MeterKnob :model-value="trkNum(trk)" :options="NUM_OPTS" :size="28" :color="trk.color" @change="(v) => setTrackNum(trk.id, v)" />
                 <span class="text-[9px] text-[#333]">/</span>

@@ -1,0 +1,15 @@
+{
+  "id": "samba",
+  "name": "Samba",
+  "genre": "Latin/Afro/World",
+  "bpm": 100,
+  "description": "Samba — surdo on 2 & 4, busy caixa 16ths, tamborim pattern.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "....x.......x...", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "x.x.x.x.x.x.x.x.", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "xxxxxxxxxxxxxxxx", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x...x...x...x...", "midiNote": 40 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "x.x.xx.x.xx.x.xx", "midiNote": 60 },
+    { "index": 15, "role": "PC2",  "timeSig": "4/4", "steps": "..x...x.x...x.x.", "midiNote": 54 }
+  ]
+}

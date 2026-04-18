@@ -1,0 +1,16 @@
+{
+  "id": "funk-jb",
+  "name": "Funk (JB)",
+  "genre": "Rock/Funk/Jazz",
+  "bpm": 104,
+  "description": "James Brown funk — syncopated kick, ghost snares, busy hats, on-the-one bass.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "x.x.....x.x.....", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "....x..x....x.x.", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "xxxxxxxxxxxxxxxx", "midiNote": 42 },
+    { "index": 3, "role": "CLAP",  "timeSig": "4/4", "steps": "....x.......x...", "midiNote": 39 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x...x.x.x..x..x.", "midiNote": 40 },
+    { "index": 5, "role": "LEAD",  "timeSig": "4/4", "steps": "x.......x.......", "midiNote": 64 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "..x.x...x.x.x..x", "midiNote": 56 }
+  ]
+}

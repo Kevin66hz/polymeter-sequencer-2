@@ -1,0 +1,14 @@
+{
+  "id": "dubstep-halftime",
+  "name": "Dubstep Halftime",
+  "genre": "House/Techno",
+  "bpm": 140,
+  "description": "Halftime dubstep — kick on 1, snare on 3, wobble bass.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "x.......x.......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "........x.......", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "x.x.x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x.......x.x.x.x.", "midiNote": 28 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "..............x.", "midiNote": 54 }
+  ]
+}

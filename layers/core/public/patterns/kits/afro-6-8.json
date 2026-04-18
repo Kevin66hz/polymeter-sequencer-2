@@ -1,0 +1,15 @@
+{
+  "id": "afro-6-8",
+  "name": "Afro 6/8",
+  "genre": "Latin/Afro/World",
+  "bpm": 110,
+  "description": "Afro 6/8 — 12-step grid, bell cross-rhythm, congas.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "6/8", "steps": "x...x.x.....", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "6/8", "steps": "...x...x....", "midiNote": 37 },
+    { "index": 2, "role": "HAT",   "timeSig": "6/8", "steps": "x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "6/8", "steps": "x.....x.....", "midiNote": 40 },
+    { "index": 7, "role": "PERC",  "timeSig": "6/8", "steps": "x.xx.xx.x.xx", "midiNote": 56 },
+    { "index": 15, "role": "PC2",  "timeSig": "6/8", "steps": "..x...x...x.", "midiNote": 63 }
+  ]
+}

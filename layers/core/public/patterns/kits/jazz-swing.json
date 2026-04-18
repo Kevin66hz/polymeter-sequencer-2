@@ -1,0 +1,15 @@
+{
+  "id": "jazz-swing",
+  "name": "Jazz Swing 12/16",
+  "genre": "Rock/Funk/Jazz",
+  "bpm": 140,
+  "description": "Jazz swing — 12/16 ride (triplet grid), walking bass, brush snare on 2 & 4.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4",   "steps": "x...x...x...x...", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4",   "steps": "....x.......x...", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "12/16", "steps": "x..x.xx..x.x", "midiNote": 51 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4",   "steps": "x...x...x...x...", "midiNote": 40 },
+    { "index": 6, "role": "PAD",   "timeSig": "4/4",   "steps": "x.......x.......", "midiNote": 60 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4",   "steps": "....x.......x...", "midiNote": 44 }
+  ]
+}

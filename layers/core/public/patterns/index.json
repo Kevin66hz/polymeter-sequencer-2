@@ -1,0 +1,74 @@
+{
+  "$schema": "preset-index/v1",
+  "genres": ["Hip-Hop", "House/Techno", "Rock/Funk/Jazz", "Latin/Afro/World", "Electro"],
+  "kits": [
+    { "id": "boom-bap",         "genre": "Hip-Hop",         "name": "Boom Bap Classic",   "bpm": 92,  "file": "kits/boom-bap.json" },
+    { "id": "trap-808",         "genre": "Hip-Hop",         "name": "Trap 808",           "bpm": 140, "file": "kits/trap-808.json" },
+    { "id": "lofi-slow",        "genre": "Hip-Hop",         "name": "Lo-Fi Slow Swing",   "bpm": 78,  "file": "kits/lofi-slow.json" },
+
+    { "id": "house-classic",    "genre": "House/Techno",    "name": "House 4/4",          "bpm": 124, "file": "kits/house-classic.json" },
+    { "id": "techno-driving",   "genre": "House/Techno",    "name": "Techno Drive",       "bpm": 130, "file": "kits/techno-driving.json" },
+    { "id": "techno-7-8",       "genre": "House/Techno",    "name": "Techno 7/8 Poly",    "bpm": 132, "file": "kits/techno-7-8.json" },
+    { "id": "dnb-amen",         "genre": "House/Techno",    "name": "D'n'B Amen-ish",     "bpm": 172, "file": "kits/dnb-amen.json" },
+    { "id": "dubstep-halftime", "genre": "House/Techno",    "name": "Dubstep Halftime",   "bpm": 140, "file": "kits/dubstep-halftime.json" },
+
+    { "id": "rock-standard",    "genre": "Rock/Funk/Jazz",  "name": "Rock Standard",      "bpm": 120, "file": "kits/rock-standard.json" },
+    { "id": "rock-7-8",         "genre": "Rock/Funk/Jazz",  "name": "Prog Rock 7/8",      "bpm": 108, "file": "kits/rock-7-8.json" },
+    { "id": "funk-jb",          "genre": "Rock/Funk/Jazz",  "name": "Funk (JB)",          "bpm": 104, "file": "kits/funk-jb.json" },
+    { "id": "jazz-swing",       "genre": "Rock/Funk/Jazz",  "name": "Jazz Swing 12/8",    "bpm": 140, "file": "kits/jazz-swing.json" },
+
+    { "id": "bossa-nova",       "genre": "Latin/Afro/World","name": "Bossa Nova",         "bpm": 128, "file": "kits/bossa-nova.json" },
+    { "id": "samba",            "genre": "Latin/Afro/World","name": "Samba",              "bpm": 100, "file": "kits/samba.json" },
+    { "id": "reggae-one-drop",  "genre": "Latin/Afro/World","name": "Reggae One Drop",    "bpm": 72,  "file": "kits/reggae-one-drop.json" },
+    { "id": "afro-6-8",         "genre": "Latin/Afro/World","name": "Afro 6/8",           "bpm": 110, "file": "kits/afro-6-8.json" },
+    { "id": "reggaeton",        "genre": "Latin/Afro/World","name": "Reggaeton",          "bpm": 95,  "file": "kits/reggaeton.json" },
+
+    { "id": "electro-miami",    "genre": "Electro",         "name": "Electro (Miami)",    "bpm": 118, "file": "kits/electro-miami.json" },
+    { "id": "electro-funk",     "genre": "Electro",         "name": "Electro Funk",       "bpm": 110, "file": "kits/electro-funk.json" },
+    { "id": "breakbeat-electro","genre": "Electro",         "name": "Electro Breaks",     "bpm": 128, "file": "kits/breakbeat-electro.json" }
+  ],
+  "lines": [
+    { "id": "kick-4floor",     "role": "KICK",  "genre": "House/Techno",    "name": "Four on the Floor", "file": "lines/kick-4floor.json" },
+    { "id": "kick-boom-bap",   "role": "KICK",  "genre": "Hip-Hop",         "name": "Boom Bap Kick",     "file": "lines/kick-boom-bap.json" },
+    { "id": "kick-trap",       "role": "KICK",  "genre": "Hip-Hop",         "name": "Trap 808 Kick",     "file": "lines/kick-trap.json" },
+    { "id": "kick-funk",       "role": "KICK",  "genre": "Rock/Funk/Jazz",  "name": "Funk Kick",         "file": "lines/kick-funk.json" },
+    { "id": "kick-dub",        "role": "KICK",  "genre": "House/Techno",    "name": "Dub Halftime",      "file": "lines/kick-dub.json" },
+    { "id": "kick-bossa",      "role": "KICK",  "genre": "Latin/Afro/World","name": "Bossa Kick",        "file": "lines/kick-bossa.json" },
+    { "id": "kick-7-8",        "role": "KICK",  "genre": "Rock/Funk/Jazz",  "name": "7/8 Prog Kick",     "file": "lines/kick-7-8.json" },
+
+    { "id": "snare-backbeat",  "role": "SNARE", "genre": "Rock/Funk/Jazz",  "name": "Backbeat 2&4",      "file": "lines/snare-backbeat.json" },
+    { "id": "snare-boom-bap",  "role": "SNARE", "genre": "Hip-Hop",         "name": "Boom Bap Snare",    "file": "lines/snare-boom-bap.json" },
+    { "id": "snare-ghost",     "role": "SNARE", "genre": "Hip-Hop",         "name": "Ghost Notes",       "file": "lines/snare-ghost.json" },
+    { "id": "snare-trap-clap", "role": "SNARE", "genre": "Hip-Hop",         "name": "Trap Clap",         "file": "lines/snare-trap-clap.json" },
+    { "id": "snare-rimshot",   "role": "SNARE", "genre": "Latin/Afro/World","name": "Latin Rim",         "file": "lines/snare-rimshot.json" },
+    { "id": "snare-shuffle",   "role": "SNARE", "genre": "Rock/Funk/Jazz",  "name": "Jazz Shuffle",      "file": "lines/snare-shuffle.json" },
+
+    { "id": "hat-straight-16", "role": "HAT",   "genre": "House/Techno",    "name": "Straight 16ths",    "file": "lines/hat-straight-16.json" },
+    { "id": "hat-offbeat",     "role": "HAT",   "genre": "House/Techno",    "name": "Offbeat 8ths",      "file": "lines/hat-offbeat.json" },
+    { "id": "hat-trap-roll",   "role": "HAT",   "genre": "Hip-Hop",         "name": "Trap Roll",         "file": "lines/hat-trap-roll.json" },
+    { "id": "hat-swing",       "role": "HAT",   "genre": "Rock/Funk/Jazz",  "name": "Swing Ride",        "file": "lines/hat-swing.json" },
+    { "id": "hat-open-close",  "role": "HAT",   "genre": "Electro",         "name": "Open/Close",        "file": "lines/hat-open-close.json" },
+
+    { "id": "clap-2-4",        "role": "CLAP",  "genre": "House/Techno",    "name": "Clap 2&4",          "file": "lines/clap-2-4.json" },
+    { "id": "clap-reggaeton",  "role": "CLAP",  "genre": "Latin/Afro/World","name": "Reggaeton Clap",    "file": "lines/clap-reggaeton.json" },
+    { "id": "clap-electro",    "role": "CLAP",  "genre": "Electro",         "name": "Electro Clap",      "file": "lines/clap-electro.json" },
+
+    { "id": "bass-4floor",     "role": "BASS",  "genre": "House/Techno",    "name": "Four on the Floor", "file": "lines/bass-4floor.json" },
+    { "id": "bass-reggae",     "role": "BASS",  "genre": "Latin/Afro/World","name": "Reggae Bubble",     "file": "lines/bass-reggae.json" },
+    { "id": "bass-funk",       "role": "BASS",  "genre": "Rock/Funk/Jazz",  "name": "Funk Slap",         "file": "lines/bass-funk.json" },
+    { "id": "bass-electro",    "role": "BASS",  "genre": "Electro",         "name": "Electro Synth",     "file": "lines/bass-electro.json" },
+
+    { "id": "lead-arp",        "role": "LEAD",  "genre": "Electro",         "name": "Arp 16ths",         "file": "lines/lead-arp.json" },
+    { "id": "lead-stab",       "role": "LEAD",  "genre": "House/Techno",    "name": "Offbeat Stab",      "file": "lines/lead-stab.json" },
+
+    { "id": "pad-long",        "role": "PAD",   "genre": "House/Techno",    "name": "Long Sustain",      "file": "lines/pad-long.json" },
+    { "id": "pad-bossa",       "role": "PAD",   "genre": "Latin/Afro/World","name": "Bossa Comp",        "file": "lines/pad-bossa.json" },
+
+    { "id": "perc-clave-32",   "role": "PERC",  "genre": "Latin/Afro/World","name": "Son Clave 3-2",     "file": "lines/perc-clave-32.json" },
+    { "id": "perc-clave-23",   "role": "PERC",  "genre": "Latin/Afro/World","name": "Son Clave 2-3",     "file": "lines/perc-clave-23.json" },
+    { "id": "perc-cowbell",    "role": "PERC",  "genre": "Latin/Afro/World","name": "Cowbell 8ths",      "file": "lines/perc-cowbell.json" },
+    { "id": "perc-tamb",       "role": "PERC",  "genre": "Rock/Funk/Jazz",  "name": "Tambourine",        "file": "lines/perc-tamb.json" },
+    { "id": "perc-conga-6-8",  "role": "PERC",  "genre": "Latin/Afro/World","name": "Conga 6/8",         "file": "lines/perc-conga-6-8.json" },
+    { "id": "perc-shaker",     "role": "PERC",  "genre": "Latin/Afro/World","name": "Shaker",            "file": "lines/perc-shaker.json" }
+  ]
+}

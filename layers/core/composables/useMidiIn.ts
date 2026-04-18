@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { reactive, toRaw } from 'vue'
 
 // ── MIDI Input: external controller support ────────────────────────
 //
@@ -55,6 +55,13 @@ export function useMidiIn(callbacks: {
   onPlay: () => void
   onStop: () => void
   onCCMapped: (controlId: string, rawValue: number) => void // 0-127
+  // Fires for note-on messages that did NOT consume the learn slot and are
+  // not bound to a mapped control. Used by the step-recording path so that
+  // mapped transport notes etc. never accidentally record into tracks.
+  onNoteIn?: (channel: number, note: number, velocity: number) => void
+  // Fires for note-off (0x80 or 0x90 vel=0) on unmapped notes. Symmetric
+  // with onNoteIn so note-repeat can stop firing on pad release.
+  onNoteOff?: (channel: number, note: number) => void
 }) {
   const state = reactive<MidiInState>({
     supported: false,
@@ -132,6 +139,18 @@ export function useMidiIn(callbacks: {
       handleNote(channel, data1, data2)
       return
     }
+
+    // ── Note Off (0x80 or 0x90 vel=0) ─────────────
+    // Skip when the note was consumed by learn or mapping — those bindings
+    // don't care about release and we don't want to emit phantom offs.
+    const isNoteOff = msgType === 0x80 || (msgType === 0x90 && data2 === 0)
+    if (isNoteOff) {
+      const mapped = state.mappings.find(
+        m => m.type === 'note' && m.channel === channel && m.number === data1
+      )
+      if (!mapped) callbacks.onNoteOff?.(channel, data1)
+      return
+    }
   }
 
   // ── Clock ─────────────────────────────────────────
@@ -165,6 +184,9 @@ export function useMidiIn(callbacks: {
   }
 
   // ── Note ──────────────────────────────────────────
+  // Precedence: learn → mapped control → onNoteIn. Whichever consumes the
+  // note first stops further handling, so a pad bound to transport_play
+  // never also records a step.
   const handleNote = (channel: number, note: number, velocity: number) => {
     if (state.learnMode && state.learnControlId) {
       recordMapping(state.learnControlId, 'note', channel, note)
@@ -172,13 +194,14 @@ export function useMidiIn(callbacks: {
       state.learnControlId = null
       return
     }
-    // Find mapping for this note
     const mapping = state.mappings.find(
       m => m.type === 'note' && m.channel === channel && m.number === note
     )
     if (mapping) {
       triggerControl(mapping.controlId, velocity)
+      return
     }
+    callbacks.onNoteIn?.(channel, note, velocity)
   }
 
   // ── CC ────────────────────────────────────────────
@@ -232,9 +255,17 @@ export function useMidiIn(callbacks: {
   }
 
   // ── Persistence ───────────────────────────────────
+  // Unwrap the reactive proxy to plain objects before stringify. Vue 3's
+  // Proxy-backed reactive arrays usually serialize correctly, but going
+  // through toRaw + shallow spread eliminates any edge case where a getter
+  // short-circuits or a subclass proxy trips JSON.stringify.
   const saveMappings = (): string => {
+    const rawList = toRaw(state.mappings) ?? []
+    const plain = rawList.map(m => ({
+      controlId: m.controlId, type: m.type, channel: m.channel, number: m.number,
+    }))
     return JSON.stringify({
-      mappings: state.mappings,
+      mappings: plain,
       syncMode: state.syncMode,
     }, null, 2)
   }

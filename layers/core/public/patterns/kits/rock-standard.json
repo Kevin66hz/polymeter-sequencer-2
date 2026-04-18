@@ -1,0 +1,15 @@
+{
+  "id": "rock-standard",
+  "name": "Rock Standard",
+  "genre": "Rock/Funk/Jazz",
+  "bpm": 120,
+  "description": "Standard rock — kick 1 & 3, snare 2 & 4, straight 8th hats.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "4/4", "steps": "x.......x.......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "4/4", "steps": "....x.......x...", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "4/4", "steps": "x.x.x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "4/4", "steps": "x.......x...x...", "midiNote": 40 },
+    { "index": 5, "role": "LEAD",  "timeSig": "4/4", "steps": "x...............", "midiNote": 60 },
+    { "index": 7, "role": "PERC",  "timeSig": "4/4", "steps": "..........x.....", "midiNote": 49 }
+  ]
+}

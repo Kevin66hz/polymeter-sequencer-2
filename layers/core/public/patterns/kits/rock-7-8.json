@@ -1,0 +1,15 @@
+{
+  "id": "rock-7-8",
+  "name": "Prog Rock 7/8",
+  "genre": "Rock/Funk/Jazz",
+  "bpm": 108,
+  "description": "Prog rock in 7/8 — 14-step grid, odd backbeat feel.",
+  "tracks": [
+    { "index": 0, "role": "KICK",  "timeSig": "7/8", "steps": "x...x..x......", "midiNote": 36 },
+    { "index": 1, "role": "SNARE", "timeSig": "7/8", "steps": "....x....x....", "midiNote": 38 },
+    { "index": 2, "role": "HAT",   "timeSig": "7/8", "steps": "x.x.x.x.x.x.x.", "midiNote": 42 },
+    { "index": 4, "role": "BASS",  "timeSig": "7/8", "steps": "x....x...x....", "midiNote": 40 },
+    { "index": 5, "role": "LEAD",  "timeSig": "7/8", "steps": "x.....x.......", "midiNote": 62 },
+    { "index": 7, "role": "PERC",  "timeSig": "7/8", "steps": "............x.", "midiNote": 49 }
+  ]
+}

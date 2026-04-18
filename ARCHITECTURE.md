@@ -78,10 +78,16 @@ polymeter-sequencer-2/
 │       ├── composables/
 │       │   ├── useSequencerStore.ts   ← pages/index.vue から抽出した脳みそ
 │       │   ├── useMidiSetup.ts        Web MIDI access / デバイス一覧
-│       │   └── useMidiIn.ts           CC/Note mapping / clock sync / learn
-│       └── components/                両アプリ共通プリミティブ
-│           ├── MeterKnob.vue
-│           └── StepCell.vue
+│       │   ├── useMidiIn.ts           CC/Note mapping / clock sync / learn / onNoteIn
+│       │   ├── useNoteRepeat.ts       （旧 MPC-style エンジン、現在は scheduler 実装に置換しコメントアウト参照）
+│       │   └── usePatternPresets.ts   KIT/LINE プリセットの読込・stage・apply・serialize
+│       ├── components/                両アプリ共通プリミティブ
+│       │   ├── MeterKnob.vue
+│       │   ├── StepCell.vue
+│       │   ├── PresetMenu.vue         KIT ▾（ジャンル × キット名）
+│       │   └── PatternPicker.vue      行内 ▾（トラックロールにマッチした LINE 選択）
+│       └── public/
+│           └── patterns/              index.json + kits/*.json + lines/*.json
 ├── apps/
 │   ├── type2/                         ← 無印
 │   │   ├── nuxt.config.ts             extends: ['../../layers/core']
@@ -99,9 +105,14 @@ polymeter-sequencer-2/
 │       ├── pages/index.vue
 │       ├── components/
 │       │   ├── CircularTrack.vue      (Plus 専用の装飾入り)
+│       │   ├── ConcentricView.vue     lean 版（Type2 互換）
+│       │   ├── ConcentricViewPlus.vue RING リッチ版（RingsStatic + RingsOverlay 合成）
 │       │   ├── RingsStatic.vue        RING 静的レイヤ (SVG)
-│       │   ├── RingsOverlay.vue       RING 動的レイヤ (Canvas)
-│       │   └── ConcentricViewPlus.vue
+│       │   ├── RingsOverlay.vue       RING 動的レイヤ (Canvas / rAF)
+│       │   ├── ConcentricView3D.vue   STAR ビュー（Three.js 入れ子球殻）
+│       │   ├── SolarView.vue          SOLAR ビュー（トラックごとの楕円軌道）
+│       │   ├── StepSequencer.vue
+│       │   └── rings-geom.ts          共有定数（リング半径配列等）
 │       ├── plugins/
 │       │   └── sequencer.client.ts    [noteRepeat, humanize, ...]
 │       ├── tailwind.config.js
@@ -291,17 +302,65 @@ import path / Tailwind content の調整。**機能は完全に同等のまま**
 `apps/type2` を `apps/type2-plus` として複製。title / meta を差別化。
 Vercel の新 project を作成（Root: `apps/type2-plus`）。
 
-**Phase 5 — Plus 側 RING リッチ化**（別タスク群、後続）
+**Phase 5 — Plus 側 RING リッチ化**
 
-- 段 1: `ConcentricView` を `RingsStatic` + `RingsOverlay` に分解し、
-  playhead と step dot の Vue リアクティブ結合を切る
-- 段 2: ジオメトリを `Map<string, {x:number[], y:number[]}>` でキャッシュ
-- 段 3: 動的レイヤを Canvas に逃がして波紋・パーティクル・残像を入れる
+- 段 1（完了 / `b207e8f`）: `ConcentricView` を `RingsStatic` + `RingsOverlay` に
+  分解し、playhead と step dot の Vue リアクティブ結合を切る。共有定数は
+  `apps/type2-plus/components/rings-geom.ts` に集約。
+- 段 2（完了 / `3fb77d7`）: ジオメトリを `getDotCoords` キャッシュ
+  （`Map<string, {x:number[], y:number[]}>`）でメモ化。ヘッドインデックスの
+  折り返しを修正（`73afdbc`）、非アクティブ step の playhead インジケータを復活
+  （`9d30ea8`）。
+- 段 3（進行中）: 動的レイヤを Canvas／WebGL に逃がす。現状は SVG +
+  Canvas オーバーレイの 2D に加え、**Three.js ベースの 3D ビュー** 2 種を追加
+  した（Plus のみ・`ClientOnly` 配下・RAF は raw ミラーのみ読む）。
 
-**Phase 6 — プラグイン基盤**（後続）
+  - `apps/type2-plus/components/ConcentricView3D.vue` — **STAR ビュー**。
+    16 トラックが入れ子球殻、各 ON step が経度方向の meridian 大円線。
+    現ステップの経線が毎フレーム最大輝度にブーストされる「回転スポットライト」
+    表現。Three.js import は `onMounted` 内で動的、Master reset 時の
+    `repeatLoopStart` クリアと同じ哲学で、`watch(props.tracks)` で差分のみ
+    再構築する（60fps の hot path は `displayHeads` / `tracksRaw` のみ読む）。
+  - `apps/type2-plus/components/SolarView.vue` — **SOLAR ビュー**。
+    各トラックに 1 つの星。軌道サイズ = `a / K`（K = active beat 数）、
+    軌道形状は拍子から決定（straight = 円、odd = 比例した離心率の楕円）。
+    「ビートが奇妙なほど軌道も奇妙」な rhythm-as-orbit 可視化。
+  - 依存: `three@^0.169` / `@types/three@^0.169` を `apps/type2-plus` に追加。
 
-`sched()` を NoteEvent パイプライン化し、`SequencerPlugin` 契約を実装。
-`noteRepeat` を最初のプラグインとして `apps/type2-plus` で有効化。
+**Phase 6 — プラグイン基盤 / 演奏系機能**（進行中・静的登録 + scheduler フック方式）
+
+`SequencerPlugin` 型（`layers/core/core/plugins/api.ts`）と
+`createScheduler` の `plugins` 引数は Phase 1 で先行実装済み。
+NoteEvent パイプライン化（transform フック）は未着手だが、
+**スケジューラ直接フックで実装できる機能は既に複数投入済み**:
+
+- **Beat-repeat（scheduler-level）** — `SchedulerDeps.repeatOnRef` /
+  `repeatStepsRef` を追加し、トラックごとに `step`（real playhead）と
+  `repeatLoopStart`（trigger 側の窓原点）を分離。REP ON 時は
+  `computeTriggerStep(real, loopStart, loopLen, trackLen)` が trigger step を
+  計算し、sched() はその step で発火する。実プレイヘッドは常に進行するので
+  **マスター遷移・Pending キュー・R1 は全く影響を受けない**（これが REP を
+  scheduler 層に入れた最大の理由）。なお、旧 MPC-style の
+  `useNoteRepeat` composable（recursive setTimeout / pad-hold）はコメント
+  アウトで残してあり、ライブ overdub で再度必要になったら戻せる。
+- **REC モード** — `useMidiIn` に `onNoteIn` / `onNoteOff` コールバックを追加
+  （precedence: learn → mapped → `onNoteIn`）。store の `recordNote(ch, note)`
+  が PLAY 中かつ REC アームド時に、マッチするトラックの現 step を toggle する
+  セルフ修正 overdub として動作。
+- **パターンプリセット library** — `layers/core/public/patterns/` に JSON
+  プリセットを同梱し、`usePatternPresets` composable がロード・適用を担う。
+  **kit**（16 トラック丸ごと）と **line**（1 トラック分）の 2 モード、
+  transition-aware apply（`generateBridge` で target メーターへ橋渡し）、
+  external clock 時は BPM を触らない ロック機構、自分自身を kit として
+  シリアライズする `serializeCurrentAsKit` を提供。
+- **Solo-aware ALL MUTE** — `allMuted` / `toggleAllMute` が solo トラックを
+  除外するよう修正（`useSequencerStore.ts`）。
+- **MIDI config v2** — `downloadMidiConfig` / `onMidiConfigLoaded` は
+  mappings + syncMode に加えて per-track MIDI OUT（ch/note/vel/gate）も
+  同梱する拡張フォーマットへ。旧形式と後方互換。
+
+NoteEvent パイプライン版プラグイン（`humanize` / `swing` / `flam` / `chord`
+/ `probability` 等）は、上記機能が安定したら着手する予定。
 
 ## 10. main ↔ feat/apps-split の同期ルール
 
