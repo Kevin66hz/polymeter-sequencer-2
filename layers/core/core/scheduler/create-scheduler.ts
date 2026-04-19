@@ -5,6 +5,16 @@
 // hot path. The consumer passes ref-like objects ({ current: T }) so that
 // state is read without triggering Vue dep tracking.
 //
+// Timer isolation: the 25ms interval that drives tick() runs inside a
+// dedicated Web Worker (timer-worker.ts). Main-thread setInterval is
+// susceptible to throttling when the browser is busy with Vue re-renders,
+// GC pauses or layout — moving the timer off-thread means the tick message
+// arrives as soon as the main thread is free, keeping the look-ahead
+// window intact even under UI load.
+//
+// AudioContext stays on the main thread (Workers have no access to it).
+// The Worker only sends a pulse; tick() still executes here.
+//
 // Plugin hook (minimal, not yet wired into sched() — see Phase 6):
 //   plugins?: SequencerPlugin[]
 // When present, the scheduler will run `transform(events, ctx)` on each
@@ -49,6 +59,10 @@ export function createScheduler(deps: SchedulerDeps) {
   const audio = deps.audioAdapter ?? defaultAudioAdapter
 
   let ctx: AudioContext | null = null
+  // Timer Worker — runs setInterval off the main thread so Vue reactive
+  // updates / GC pauses don't coalesce ticks. Falls back to plain
+  // setInterval when Workers are unavailable (SSR, test env, old browser).
+  let timerWorker: Worker | null = null
   let intervalId: ReturnType<typeof setInterval> | null = null
   let rafId: number | null = null
   // `step` is the REAL playhead — it always advances one step per tick
@@ -202,6 +216,35 @@ export function createScheduler(deps: SchedulerDeps) {
     rafId = requestAnimationFrame(rafLoop)
   }
 
+  // Start the off-thread interval timer. Falls back to main-thread
+  // setInterval when Workers aren't available (SSR / old browsers).
+  const startTimer = () => {
+    if (typeof Worker !== 'undefined') {
+      try {
+        timerWorker = new Worker(
+          new URL('./timer-worker.ts', import.meta.url),
+          { type: 'module' },
+        )
+        timerWorker.onmessage = () => { if (running) tick() }
+        timerWorker.postMessage(25)
+        return
+      } catch {
+        // Worker construction failed — fall through to setInterval.
+        timerWorker = null
+      }
+    }
+    intervalId = setInterval(tick, 25)
+  }
+
+  const stopTimer = () => {
+    if (timerWorker) {
+      timerWorker.postMessage(0)   // tell worker to stop
+      timerWorker.terminate()
+      timerWorker = null
+    }
+    if (intervalId) { clearInterval(intervalId); intervalId = null }
+  }
+
   const play = () => {
     if (running) return
     if (!ctx) ctx = new AudioContext()
@@ -211,16 +254,14 @@ export function createScheduler(deps: SchedulerDeps) {
     displayHeads.current = Array(TRACK_COUNT).fill(0)
     masterResetArmed = false
     running = true
-    intervalId = setInterval(tick, 25)
+    startTimer()
     rafId = requestAnimationFrame(rafLoop)
   }
 
   const stop = () => {
     running = false
-    if (intervalId) clearInterval(intervalId)
-    if (rafId) cancelAnimationFrame(rafId)
-    intervalId = null
-    rafId = null
+    stopTimer()
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null }
     masterResetArmed = false
     displayHeads.current = Array(TRACK_COUNT).fill(-1)
     onHeadsTick(Array(TRACK_COUNT).fill(-1))
