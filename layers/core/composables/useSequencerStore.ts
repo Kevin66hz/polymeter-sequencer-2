@@ -18,6 +18,7 @@ import { generateBridge } from '#core/pure/bridge'
 import { createScheduler } from '#core/scheduler/create-scheduler'
 import { TRACK_COUNT, type Pending, type Track } from '#core/types'
 import { useMidi } from './useMidi'
+import { useLaunchControlFeedback } from './useLaunchControlFeedback'
 import { useMidiIn } from './useMidiIn'
 import { useMidiModifiers } from './useMidiModifiers'
 import { useMidiPresets } from './useMidiPresets'
@@ -488,74 +489,34 @@ export function useSequencerStore() {
     // driven and doesn't care about pad release.
   })
 
-  // External clock → BPM sync
+  // External clock → BPM sync.
+  // syncMode ガードは不要 — handleClock が既に syncMode==='external' のときのみ
+  // syncBpm を更新するため、ウォッチャー側で再チェックすると競合状態になる
+  // (syncBpm 変更後 / ウォッチャー実行前に syncMode が切り替わると更新が抜ける)。
   watch(() => midiIn.state.syncBpm, v => {
-    if (midiIn.state.syncMode === 'external' && v !== null) { bpmRaw.current = v; bpm.value = v }
+    if (v !== null) { bpmRaw.current = v; bpm.value = v }
   })
 
   // ── Reactive → raw mirror sync ──────────────────────────────────────
+  // deep: true は不要。全ミューテーションが .map() による参照差し替えパターン
+  // なので shallow watch（デフォルト）で確実に検知できる。deep: true を使うと
+  // Vue が毎回ネストされたオブジェクト全体をトラバーサルしてメインスレッドを
+  // ブロックし、setInterval(tick, 25) を遅延させてテンポが止まる原因になる。
   watch(audioOn, v => { audioEnabledRef.current = v })
   watch(bpm, v => { bpmRaw.current = v })
-  watch(tracks, v => { tracksRaw.current = v.map(t => ({ ...t, steps: [...t.steps] })) }, { deep: true })
-  watch(pendQ, v => { pendingRaw.current = v.map(q => q.map(p => ({ ...p }))) }, { deep: true })
+  watch(tracks, v => { tracksRaw.current = v.map(t => ({ ...t, steps: [...t.steps] })) })
+  watch(pendQ, v => { pendingRaw.current = v.map(q => q.map(p => ({ ...p }))) })
   watch(masterTarget, v => { masterTargetRef.current = v })
   watch(repeatOn, v => { repeatOnRaw.current = v })
   watch(repeatRate, v => { repeatStepsRaw.current = computeRepeatSteps(v) })
-
-  // ── Controller LED feedback (Launch Control XL MK2 user template) ──
-  //
-  // The MK2 in User Mode uses note-on messages sent BACK to the same
-  // note the pad emits to set that pad's LED colour. Velocity encodes
-  // a red (bits 0-1) × green (bits 4-5) colour pair:
-  //     off   = 12  (0x0C: red=0 green=0 + behaviour bits)
-  //     red   = 15  (0x0F: red=3 green=0 + behaviour bits)
-  //     green = 60  (0x3C: red=0 green=3 + behaviour bits)
-  //     amber = 63  (0x3F: red=3 green=3 + behaviour bits)
-  // Bits 2 & 3 (clear/copy) are set so the LED updates immediately.
-  //
-  // Per user spec: MUTE OFF (unmuted) = red lit; MUTE ON (muted) =
-  // off. SOLO view mirrors the same "state == lit" pattern but with
-  // green (soloed = green, not-soloed = off). We only send updates to
-  // the *feedback* output (auto-detected by name in useMidi.ts), so
-  // the user's synth outputs don't get phantom notes.
-  const LED_OFF   = 12
-  const LED_RED   = 15
-  const LED_GREEN = 60
-  const LED_AMBER = 63
-  // Dim amber for rec-view "resting" state. LC XL MK2 LED velocity is a
-  // 4-bit palette: bits 0-1 = red (0..3), bits 4-5 = green (0..3), bits
-  // 2-3 = clear/copy behaviour. red=1 + green=1 + clear = 0b00011101
-  // = 29 — same hue as LED_AMBER (red=3 + green=3 = 0x3F) but at 1/3
-  // brightness on each channel. Used as the ambient fill in rec view
-  // so every pad is faintly lit; the step-active pulse overwrites with
-  // LED_AMBER (63) for a clear "active hit" flash, then reverts.
-  const LED_AMBER_DIM = 29
-
-  // Look up `trackN_rec` mapping from midiIn.state.mappings and return
-  // (channel, note) or null. Memoised implicitly via the computed
-  // wrapper below.
-  const padMappings = computed(() => {
-    const out: ({ channel: number; note: number } | null)[] = Array(16).fill(null)
-    for (let i = 0; i < 16; i++) {
-      const m = midiIn.state.mappings.find(x => x.controlId === `track${i}_rec` && x.type === 'note')
-      out[i] = m ? { channel: m.channel, note: m.number } : null
-    }
-    return out
-  })
-
-  // Compute the velocity for one track's LED in the current pad view.
-  // Pure function of (track, view) so it's safe to call inside the
-  // update loop below without side-effects.
-  const ledVelForTrack = (trk: { mute: boolean; solo: boolean }, view: 'mute' | 'solo') => {
-    if (view === 'mute') return trk.mute ? LED_OFF : LED_RED
-    return trk.solo ? LED_GREEN : LED_OFF
-  }
 
   // Effective pad-view MODE including the special 'rec' case. Recording
   // mode turns the pads into a playhead visualiser: each pad pulses
   // amber when its track's head advances to a new step. M/S hold still
   // wins (momentary override) so the user can mute/solo-check without
   // leaving recording mode. Precedence: M/S hold > recording > padView.
+  // Kept here (not in useLaunchControlFeedback) because the UI also
+  // reads this value independently of LED state.
   const effectivePadViewMode = computed<'rec' | 'mute' | 'solo'>(() => {
     if (midiModifiers.state.m) return 'mute'
     if (midiModifiers.state.s) return 'solo'
@@ -563,280 +524,15 @@ export function useSequencerStore() {
     return midiModifiers.state.padView
   })
 
-  // Per-pad "rec pulse" timers. Each entry is the pending setTimeout
-  // handle that will turn the amber LED back off after the pulse
-  // window. Kept outside reactivity so firing them doesn't re-run any
-  // watchers. Length matches TRACK_COUNT (16).
-  const REC_PULSE_MS = 90
-  const recPulseTimers: (ReturnType<typeof setTimeout> | null)[] =
-    Array(16).fill(null)
+  // ── Launch Control XL MK2 LED feedback ──────────────────────────────
+  // All controller-specific LED logic (pad colours, modifier button LEDs,
+  // REC blink timer) is encapsulated in this composable. Cleanup on
+  // unmount (timer cancel + LED clear) is handled internally.
+  useLaunchControlFeedback({
+    tracks, heads, recording, repeatOn, savedSnapshot,
+    effectivePadViewMode, midi, midiIn, midiModifiers,
+  })
 
-  const clearRecPulseTimers = () => {
-    for (let i = 0; i < 16; i++) {
-      const t = recPulseTimers[i]
-      if (t) { clearTimeout(t); recPulseTimers[i] = null }
-    }
-  }
-
-  const clearAllPads = () => {
-    for (let i = 0; i < 16; i++) {
-      const map = padMappings.value[i]
-      if (!map) continue
-      midi.sendFeedback(map.channel, map.note, LED_OFF)
-    }
-  }
-
-  // Paint every mapped pad at the rec-view "resting" brightness (dim
-  // amber). Used on entering rec view and as the pulse-off target so
-  // LEDs return to dim amber between active-step flashes instead of
-  // going dark.
-  const fillAllPadsDimAmber = () => {
-    for (let i = 0; i < 16; i++) {
-      const map = padMappings.value[i]
-      if (!map) continue
-      midi.sendFeedback(map.channel, map.note, LED_AMBER_DIM)
-    }
-  }
-
-  const refreshAllPadLeds = () => {
-    const mode = effectivePadViewMode.value
-    if (mode === 'rec') {
-      // Rec view: every pad idles at dim amber; the heads watcher
-      // below bright-flashes amber for the brief moment a track's
-      // playhead lands on an *active* step, then reverts to dim.
-      fillAllPadsDimAmber()
-      return
-    }
-    // Normal MUTE / SOLO colour fill (including the momentary
-    // temporary override while M or S is held on the controller).
-    for (let i = 0; i < 16; i++) {
-      const map = padMappings.value[i]
-      if (!map) continue
-      const trk = tracks.value[i]
-      if (!trk) continue
-      midi.sendFeedback(map.channel, map.note, ledVelForTrack(trk, mode))
-    }
-  }
-
-  // Bulk refresh on: effective view-mode change (persisted padView,
-  // M/S hold, or recording flip), mappings change, output-list change
-  // (controller just (dis)connected). Don't depend on `tracks` deep —
-  // per-track mute/solo changes are handled by a narrower watcher
-  // below to keep the per-change cost to a single MIDI message.
-  watch(
-    [
-      effectivePadViewMode,
-      padMappings,
-      () => midi.feedbackOutputName.value,
-    ],
-    (_curr, _prev) => {
-      // When leaving rec view (or switching inside rec to a temporary
-      // MUTE/SOLO view), any in-flight amber-off timers should be
-      // cancelled — otherwise they'd overwrite the fresh MUTE/SOLO
-      // colour a few milliseconds later.
-      clearRecPulseTimers()
-      refreshAllPadLeds()
-    },
-    { immediate: true },
-  )
-
-  // Per-track LED update. Fires on any change to a track's mute / solo
-  // state; sends exactly one LED message for just that pad. Using a
-  // joined-string watch source lets Vue compare old vs new in one shot
-  // without pulling the whole tracks array through a deep watcher.
-  // Skipped entirely during rec view (LED is driven by the heads
-  // watcher in that mode).
-  watch(
-    () => tracks.value.map(t => `${t.mute ? 1 : 0}${t.solo ? 1 : 0}`),
-    (curr, prev) => {
-      const mode = effectivePadViewMode.value
-      if (mode === 'rec') return
-      for (let i = 0; i < 16; i++) {
-        if (prev && curr[i] === prev[i]) continue
-        const map = padMappings.value[i]
-        if (!map) continue
-        const trk = tracks.value[i]
-        if (!trk) continue
-        midi.sendFeedback(map.channel, map.note, ledVelForTrack(trk, mode))
-      }
-    },
-  )
-
-  // Rec-view playhead pulse. When a track's head advances while we're
-  // in rec mode, flash the corresponding pad amber for REC_PULSE_MS
-  // then switch it back off — but ONLY when the new step position
-  // actually has a note (i.e. `t.steps[head] === true`). Empty steps
-  // don't pulse; that way the pads show the track's active step
-  // *pattern* as it plays instead of a constant metronome, which is
-  // what the user wants for recording feedback ("対象のChのステップで
-  // 光る").
-  //
-  // Each track has its own timer so fast tracks can pulse
-  // independently of slow ones. The timer's "off" callback double-
-  // checks that we're still in rec mode so late-firing timers don't
-  // repaint over a MUTE/SOLO view.
-  watch(
-    heads,
-    (curr, prev) => {
-      if (effectivePadViewMode.value !== 'rec') return
-      for (let i = 0; i < 16; i++) {
-        const h = curr[i]
-        if (prev && prev[i] === h) continue
-        if (h < 0) continue
-        const trk = tracks.value[i]
-        if (!trk) continue
-        // Only pulse when the step at the new head position is active.
-        if (!trk.steps[h]) continue
-        const map = padMappings.value[i]
-        if (!map) continue
-        midi.sendFeedback(map.channel, map.note, LED_AMBER)
-        const prevTimer = recPulseTimers[i]
-        if (prevTimer) clearTimeout(prevTimer)
-        recPulseTimers[i] = setTimeout(() => {
-          recPulseTimers[i] = null
-          if (effectivePadViewMode.value !== 'rec') return
-          const m2 = padMappings.value[i]
-          if (!m2) return
-          // Revert to the dim-amber resting state, not fully off —
-          // so all pads stay faintly lit throughout rec view and only
-          // the one that just hit an active step flashes brightly.
-          midi.sendFeedback(m2.channel, m2.note, LED_AMBER_DIM)
-        }, REC_PULSE_MS)
-      }
-    },
-    { deep: true },
-  )
-
-  // ── Modifier + right-nav button LED feedback ───────────────────────
-  //
-  // Mirrors the pad LED feedback above but for the four right-column
-  // modifier buttons (D/M/S/R, bound as notes) and the right-nav
-  // buttons (SS1/SS2/TS1/TS2, bound as CCs).
-  //
-  // Per user spec:
-  //   D — lit (red) only while held
-  //   M — lit (red) while held OR during MUTE view
-  //   S — lit (green) while held OR during SOLO view
-  //   R — blinks (red) while recording mode is ON
-  //   SS2 (repeat_trigger) — lit (red) while beat-repeat is ON
-  //   TS2 (snapshot_recall) — lit (green) when a snapshot is saved and
-  //       thus recallable
-  //
-  // Channels/notes/CCs are read from the live mapping table so a user
-  // who has rebound these controls via Learn still gets feedback on the
-  // right buttons. If a control isn't bound (mapping is null), we just
-  // skip — no LED to drive.
-  const ctrlMapping = (controlId: string) => {
-    const m = midiIn.state.mappings.find(x => x.controlId === controlId)
-    if (!m) return null
-    return { type: m.type, channel: m.channel, number: m.number }
-  }
-
-  // Blink state for the R button. Toggled by an interval timer only
-  // while `recording.value` is true. Kept outside Vue reactivity so
-  // the timer ticking doesn't re-run unrelated watchers.
-  let rBlinkPhase = false
-  let rBlinkTimer: ReturnType<typeof setInterval> | null = null
-  const R_BLINK_MS = 400
-
-  // LED encoding differs by button type on LC XL MK2:
-  //
-  //   - Pads (bi-colour red+green): 4-bit palette with clear/copy bits
-  //     set. Already handled by the pad LED code above.
-  //
-  //   - Right-column modifier buttons (D/M/S/R, single-colour red) and
-  //     the right-nav (SS/TS, single-colour red, CC-bound): the LC XL
-  //     MK2 interprets velocity/value as a plain 0..127 brightness, not
-  //     the pad bit-pattern. Sending `12` (our pad "off") actually
-  //     leaves those LEDs dimly lit because the firmware sees
-  //     `velocity != 0`. We use simple 0/127 here.
-  //
-  // If a user's custom template assigns a GREEN channel to a single-
-  // colour LED that doesn't physically have green, the LED just stays
-  // off — no harm done.
-  const BTN_OFF = 0
-  const BTN_ON  = 127
-
-  const sendModLed = (controlId: string, on: boolean) => {
-    const m = ctrlMapping(controlId)
-    if (!m) return
-    const val = on ? BTN_ON : BTN_OFF
-    if (m.type === 'note') midi.sendFeedback(m.channel, m.number, val)
-    else midi.sendFeedbackCC(m.channel, m.number, val)
-  }
-
-  const refreshModLeds = () => {
-    const st = midiModifiers.state
-    // D: lit only while held.
-    sendModLed('mod_d', st.d)
-    // M: MUTE view or held.
-    sendModLed('mod_m', st.m || st.padView === 'mute')
-    // S: SOLO view or held (physical LED is red, so "green" is
-    // conceptual only — the pad LEDs show green in SOLO view).
-    sendModLed('mod_s', st.s || st.padView === 'solo')
-    // R: blinks while recording mode is ON; also lit while the
-    // hardware key is held (so a tap still gives visual feedback).
-    const rLit = recording.value ? rBlinkPhase : st.r
-    sendModLed('mod_r', rLit)
-    // Right-nav LED state. Both snapshot buttons (SS1=Save / TS1=Recall)
-    // go dark when there is no saved snapshot — SS1 doubles as "clear
-    // snapshot" when D is held, so its LED indicates "a snapshot
-    // exists that can be cleared"; TS1 indicates "a snapshot exists
-    // that can be recalled". When nothing is saved, both buttons have
-    // no side effect, so an unlit LED signals "not useful right now"
-    // at a glance.  The other two (repeat trigger, master apply) are
-    // always useful so we keep them lit to help the user find them in
-    // the dark.
-    const snapLit = !!savedSnapshot.value
-    sendModLed('snapshot_save',   snapLit)
-    sendModLed('repeat_trigger',  true)
-    sendModLed('snapshot_recall', snapLit)
-    sendModLed('master_apply',    true)
-  }
-
-  // Drive the blink timer lifecycle from the `recording` flag. When it
-  // flips on we start a repeating interval that toggles phase + pushes
-  // an LED update; when it flips off we stop the timer and force R
-  // back to a steady state (held-or-off) via refreshModLeds.
-  watch(recording, (on) => {
-    if (on) {
-      if (!rBlinkTimer) {
-        rBlinkPhase = true
-        rBlinkTimer = setInterval(() => {
-          rBlinkPhase = !rBlinkPhase
-          // Only the R LED needs re-sending per tick.
-          const st = midiModifiers.state
-          const rLit = recording.value ? rBlinkPhase : st.r
-          sendModLed('mod_r', rLit)
-        }, R_BLINK_MS)
-      }
-    } else {
-      if (rBlinkTimer) { clearInterval(rBlinkTimer); rBlinkTimer = null }
-      rBlinkPhase = false
-    }
-    refreshModLeds()
-  }, { immediate: true })
-
-  // Bulk-refresh whenever any input-side state that affects LEDs
-  // changes. Using a joined-string computed to keep the watcher cheap.
-  watch(
-    () => [
-      midiModifiers.state.d,
-      midiModifiers.state.m,
-      midiModifiers.state.s,
-      midiModifiers.state.r,
-      midiModifiers.state.padView,
-      repeatOn.value,
-      !!savedSnapshot.value,
-      // Re-assert LEDs when the feedback output (re)connects or the
-      // mapping table changes so newly-available hardware gets the
-      // current state pushed to it.
-      midi.feedbackOutputName.value,
-      midiIn.state.mappings,
-    ],
-    () => refreshModLeds(),
-    { immediate: true, deep: true },
-  )
 
   // ── Scheduler lifecycle ─────────────────────────────────────────────
   let scheduler: ReturnType<typeof createScheduler> | null = null
@@ -923,17 +619,11 @@ export function useSequencerStore() {
   onBeforeUnmount(() => {
     scheduler?.dispose()
     midi.panic()
-    // Stop the R-button blink timer if it's still running.
-    if (rBlinkTimer) { clearInterval(rBlinkTimer); rBlinkTimer = null }
-    // Cancel any pending rec-view amber-off pulses so they don't fire
-    // after we've cleared the LEDs and repaint stale state.
-    clearRecPulseTimers()
     // Cancel any pending per-track knob-debounce commits so a late
     // setTimeout can't write to store refs after the view is gone.
     clearAllTrackCommitTimers()
-    // Clear any lit pad LEDs on the controller so nothing lingers
-    // after the page unmounts.
-    midi.clearFeedback()
+    // LED timer cancellation and clearFeedback() are handled by
+    // useLaunchControlFeedback's own onBeforeUnmount hook.
   })
 
   // ── Transport ───────────────────────────────────────────────────────

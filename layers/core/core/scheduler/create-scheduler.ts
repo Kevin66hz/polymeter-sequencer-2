@@ -83,14 +83,20 @@ export function createScheduler(deps: SchedulerDeps) {
   }
 
   const sched = (id: number, si: number, time: number) => {
-    const trk = tracksRaw.current[id]
-    if (!trk) return
-    const anySolo = tracksRaw.current.some((t) => t.solo)
-    const ok = !trk.mute && (!anySolo || trk.solo) && trk.steps[si]
+    if (!tracksRaw.current[id]) return
     const ms = Math.max(0, (time - (ctx?.currentTime ?? 0)) * 1000)
     setTimeout(() => {
       if (!running) return
       displayHeads.current[id] = si
+      // ミュート / ソロ / ステップ有効チェックを発火時点で再評価する。
+      // スケジュール時に ok を確定すると最大ルックアヘッド (150ms) 遅れで
+      // ミュートが反映されるため、ここで tracksRaw.current を再読みする。
+      // tracksRaw はプレーン JS オブジェクトなので Vue リアクティビティは
+      // 踏まない — hot path への影響はない。
+      const trk = tracksRaw.current[id]
+      if (!trk) return
+      const anySolo = tracksRaw.current.some((t) => t.solo)
+      const ok = !trk.mute && (!anySolo || trk.solo) && trk.steps[si]
       if (ok) {
         if (audioEnabledRef.current && ctx) audio.trigger(ctx, id)
         midiFireRef.current?.(id)
@@ -113,7 +119,7 @@ export function createScheduler(deps: SchedulerDeps) {
   const tick = () => {
     if (!running || !ctx) return
     const now = ctx.currentTime
-    const ah = 0.1
+    const ah = 0.15
 
     // Snapshot REP state at tick start. Reading `.current` directly on
     // every iteration would be fine too; tick boundary is convenient and

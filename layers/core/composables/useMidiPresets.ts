@@ -90,20 +90,35 @@ export function useMidiPresets() {
   // resets it so the user always gets the template on first connect.
   const autoAppliedIds = new Set<string>()
 
+  // In-flight fetch promise. Stored so concurrent callers (e.g. the
+  // inputs-watcher firing for multiple devices at once) all await the
+  // same request rather than each returning null while loading=true.
+  // Previous implementation returned `index.value` (null) when
+  // loading=true, causing autoApplyForDevice to see no index and skip
+  // the template — this was the root cause of Bug 3 on deployed builds
+  // where the device-connect watcher raced the initial loadIndex call.
+  let loadingPromise: Promise<MidiPresetIndex | null> | null = null
+
   async function loadIndex(): Promise<MidiPresetIndex | null> {
-    if (index.value || loading.value) return index.value
+    if (index.value) return index.value
+    if (loadingPromise) return loadingPromise
     loading.value = true; error.value = null
-    try {
-      const res = await fetch('/midi-presets/index.json', { cache: 'no-cache' })
-      if (!res.ok) throw new Error(`midi-presets index ${res.status}`)
-      index.value = await res.json() as MidiPresetIndex
-    } catch (e: any) {
-      error.value = String(e?.message ?? e)
-      console.warn('[midi-presets] failed to load index', e)
-    } finally {
-      loading.value = false
-    }
-    return index.value
+    const p = (async () => {
+      try {
+        const res = await fetch('/midi-presets/index.json', { cache: 'no-cache' })
+        if (!res.ok) throw new Error(`midi-presets index ${res.status}`)
+        index.value = await res.json() as MidiPresetIndex
+      } catch (e: any) {
+        error.value = String(e?.message ?? e)
+        console.warn('[midi-presets] failed to load index', e)
+      } finally {
+        loading.value = false
+        loadingPromise = null
+      }
+      return index.value
+    })()
+    loadingPromise = p
+    return p
   }
 
   // Return the first preset whose match rules fire for this device
