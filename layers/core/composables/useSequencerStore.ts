@@ -498,14 +498,34 @@ export function useSequencerStore() {
   })
 
   // ── Reactive → raw mirror sync ──────────────────────────────────────
-  // deep: true は不要。全ミューテーションが .map() による参照差し替えパターン
-  // なので shallow watch（デフォルト）で確実に検知できる。deep: true を使うと
-  // Vue が毎回ネストされたオブジェクト全体をトラバーサルしてメインスレッドを
-  // ブロックし、setInterval(tick, 25) を遅延させてテンポが止まる原因になる。
+  // 全ミューテーションが .map() による参照差し替えパターンなので shallow watch で
+  // 確実に検知できる。deep: true を使うと Vue が全オブジェクトをトラバースして
+  // メインスレッドをブロックし setInterval(tick, 25) が遅延する。
+  //
+  // さらに「変更されたトラック / キューだけ」差し替える per-entry diff を行う。
+  // doMute / doSolo などは .map() で変更トラック以外の参照を保持するので、
+  // curr[i] !== prev[i] のエントリのみ新オブジェクトを生成することで
+  // MUTE/SOLO 連打や N 連続変更時のオブジェクト生成コストを 1/16 に削減する。
   watch(audioOn, v => { audioEnabledRef.current = v })
   watch(bpm, v => { bpmRaw.current = v })
-  watch(tracks, v => { tracksRaw.current = v.map(t => ({ ...t, steps: [...t.steps] })) })
-  watch(pendQ, v => { pendingRaw.current = v.map(q => q.map(p => ({ ...p }))) })
+  watch(tracks, (curr, prev) => {
+    const next = tracksRaw.current.slice()
+    for (let i = 0; i < curr.length; i++) {
+      if (!prev || curr[i] !== prev[i]) {
+        next[i] = { ...curr[i], steps: [...curr[i].steps] }
+      }
+    }
+    tracksRaw.current = next
+  })
+  watch(pendQ, (curr, prev) => {
+    const next = pendingRaw.current.slice()
+    for (let i = 0; i < curr.length; i++) {
+      if (!prev || curr[i] !== prev[i]) {
+        next[i] = curr[i].map(p => ({ ...p }))
+      }
+    }
+    pendingRaw.current = next
+  })
   watch(masterTarget, v => { masterTargetRef.current = v })
   watch(repeatOn, v => { repeatOnRaw.current = v })
   watch(repeatRate, v => { repeatStepsRaw.current = computeRepeatSteps(v) })

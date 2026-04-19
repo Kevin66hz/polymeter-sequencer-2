@@ -83,20 +83,14 @@ export function createScheduler(deps: SchedulerDeps) {
   }
 
   const sched = (id: number, si: number, time: number) => {
-    if (!tracksRaw.current[id]) return
+    const trk = tracksRaw.current[id]
+    if (!trk) return
+    const anySolo = tracksRaw.current.some((t) => t.solo)
+    const ok = !trk.mute && (!anySolo || trk.solo) && trk.steps[si]
     const ms = Math.max(0, (time - (ctx?.currentTime ?? 0)) * 1000)
     setTimeout(() => {
       if (!running) return
       displayHeads.current[id] = si
-      // ミュート / ソロ / ステップ有効チェックを発火時点で再評価する。
-      // スケジュール時に ok を確定すると最大ルックアヘッド (150ms) 遅れで
-      // ミュートが反映されるため、ここで tracksRaw.current を再読みする。
-      // tracksRaw はプレーン JS オブジェクトなので Vue リアクティビティは
-      // 踏まない — hot path への影響はない。
-      const trk = tracksRaw.current[id]
-      if (!trk) return
-      const anySolo = tracksRaw.current.some((t) => t.solo)
-      const ok = !trk.mute && (!anySolo || trk.solo) && trk.steps[si]
       if (ok) {
         if (audioEnabledRef.current && ctx) audio.trigger(ctx, id)
         midiFireRef.current?.(id)
