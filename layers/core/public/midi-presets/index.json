@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "_description": "Registry of shippable MIDI controller templates. Each entry points at a JSON file in this same directory. The `match` block describes how to detect the controller — the auto-apply logic in useMidiPresets walks selected inputs and matches against these hints. Name matches are substring / case-insensitive.",
+  "presets": [
+    {
+      "id": "launch-control-xl-mk2",
+      "name": "Launch Control XL MK2 (User Template)",
+      "file": "launch-control-xl-mk2.json",
+      "controller": "Novation Launch Control XL MK2",
+      "match": {
+        "inputNameIncludes": ["launch control"]
+      }
+    }
+  ]
+}

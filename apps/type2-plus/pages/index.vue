@@ -21,6 +21,7 @@ const {
   masterNum, masterDen, masterMode, masterBridgeBars, masterTarget,
   savedSnapshot, showMapping, recording, repeatOn, repeatRate,
   midi, midiIn,
+  hasMidiPresetForDevice, applyMidiPresetForDevice,
   play, stop,
   saveSnapshot, recallSnapshot,
   setTrackNum, setTrackDen, toggleTrackMode,
@@ -29,9 +30,10 @@ const {
   onCircleSelect, onBackgroundClick,
   selTrack, detTrk,
   updSel, updDet,
-  trkNum, trkDen, pendingSig,
+  trkNum, trkDen, pendingSig, displaySig,
   isLearning, toggleLearn, bindingLabel, hasBound,
   allMuted, toggleAllMute,
+  effectivePadView, padViewMode, padViewIsTemporary,
   // Raw mirrors for RAF-driven overlay (Phase 5 Stage 1)
   displayHeads, tracksRaw,
 } = useSequencerStore()
@@ -102,6 +104,20 @@ const showKitSave = ref(false)
 const kitSaveName = ref('My Kit')
 const kitSaveInput = ref<HTMLInputElement | null>(null)
 
+// MIDI SAVE / LOAD popovers — split into two independent categories:
+//   - TRACKS  : per-track synth settings (channel / note / velocity / gate)
+//   - MAPPING : learn bindings + device selection + clock source + syncMode
+// Users often want one without the other: e.g. carry a pad-controller
+// mapping across kits without stomping the kit's synth channels, or copy
+// a kit's synth config without resetting their controller bindings.
+// Each popover has two checkboxes driving a single action button.
+const showMidiSave = ref(false)
+const showMidiLoad = ref(false)
+const midiSaveTracks = ref(true)
+const midiSaveMapping = ref(true)
+const midiLoadTracks = ref(true)
+const midiLoadMapping = ref(true)
+
 // ── Global keybind: Space = play/stop (skip when typing in fields) ──
 function onGlobalKeyDown(e: KeyboardEvent) {
   const t = e.target as HTMLElement | null
@@ -116,21 +132,21 @@ onMounted(() => { window.addEventListener('keydown', onGlobalKeyDown) })
 onBeforeUnmount(() => { window.removeEventListener('keydown', onGlobalKeyDown) })
 
 // ── MIDI config download / upload ───────────────────────────────────
-// The combined MIDI JSON carries:
-//   • MIDI IN mappings + syncMode  (midiIn.state)
-//   • per-track MIDI OUT config    (channel / note / velocity / gate)
-// steps and time signatures are left alone — that's what KIT SAVE/LOAD is for.
+// Split into two independently-saveable categories:
+//   TRACKS  : per-track MIDI OUT (ch / note / velocity / gate)
+//   MAPPING : learn mappings + syncMode + device selections + clockSource
+// Each file carries its own `kind` discriminator. LOAD applies only the
+// categories the user checked, so dragging a mapping-only file in won't
+// stomp the kit's track settings. Steps / time signatures are untouched —
+// use KIT SAVE/LOAD for those.
 //
-// Backward compatible with older files that only contain { mappings, syncMode }.
+// Backward compatible with older combined files (`midi-config` v1/v2).
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
 }
-function downloadMidiConfig() {
-  const data = {
-    type: 'midi-config',
-    version: 2,
-    mappings: midiIn.state.mappings.map(m => ({ ...m })),
-    syncMode: midiIn.state.syncMode,
+
+function buildTrackSection() {
+  return {
     tracks: tracks.value.map((t, i) => ({
       index: i,
       name: t.name,
@@ -140,37 +156,82 @@ function downloadMidiConfig() {
       gateMs: t.gateMs,
     })),
   }
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob); const a = document.createElement('a')
-  a.href = url; a.download = 'midi-config.json'; a.click(); URL.revokeObjectURL(url)
 }
+function buildMappingSection() {
+  return {
+    mappings: midiIn.state.mappings.map(m => ({ ...m })),
+    syncMode: midiIn.state.syncMode,
+    selectedOutIds: [...midi.selectedIds.value],
+    selectedInIds: [...midiIn.state.selectedIds],
+    // `selectedIds` is the key midiIn.loadMappings natively recognizes.
+    selectedIds: [...midiIn.state.selectedIds],
+    clockSourceId: midiIn.state.clockSourceId,
+  }
+}
+
+function doMidiSave() {
+  const wantTracks = midiSaveTracks.value
+  const wantMapping = midiSaveMapping.value
+  if (!wantTracks && !wantMapping) { showMidiSave.value = false; return }
+
+  let payload: any
+  let filename: string
+  if (wantTracks && wantMapping) {
+    payload = { type: 'midi-config', version: 2, ...buildTrackSection(), ...buildMappingSection() }
+    filename = 'midi-config.json'
+  } else if (wantTracks) {
+    payload = { type: 'midi-tracks', version: 2, ...buildTrackSection() }
+    filename = 'midi-tracks.json'
+  } else {
+    payload = { type: 'midi-mapping', version: 2, ...buildMappingSection() }
+    filename = 'midi-mapping.json'
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob); const a = document.createElement('a')
+  a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url)
+  showMidiSave.value = false
+}
+
+function applyTrackSection(data: any) {
+  if (!Array.isArray(data?.tracks)) return
+  const byIndex = new Map<number, any>()
+  for (const e of data.tracks) {
+    if (typeof e?.index === 'number') byIndex.set(e.index, e)
+  }
+  tracks.value = tracks.value.map((t, i) => {
+    const src = byIndex.get(i); if (!src) return t
+    return {
+      ...t,
+      ...(typeof src.midiChannel  === 'number' ? { midiChannel:  clamp(src.midiChannel | 0, 1, 16) }   : {}),
+      ...(typeof src.midiNote     === 'number' ? { midiNote:     clamp(src.midiNote    | 0, 0, 127) } : {}),
+      ...(typeof src.midiVelocity === 'number' ? { midiVelocity: clamp(src.midiVelocity| 0, 1, 127) } : {}),
+      ...(typeof src.gateMs       === 'number' ? { gateMs:       clamp(src.gateMs      | 0, 10, 500) } : {}),
+    }
+  })
+}
+function applyMappingSection(text: string, data: any) {
+  // Delegates to midiIn.loadMappings (tolerates extra keys) plus OUT
+  // selection restore.
+  midiIn.loadMappings(text)
+  if (Array.isArray(data?.selectedOutIds)) {
+    midi.setOutputs(data.selectedOutIds.filter((x: unknown): x is string => typeof x === 'string'))
+  } else if (typeof data?.selectedOutId === 'string' && data.selectedOutId) {
+    midi.setOutputs([data.selectedOutId])
+  }
+}
+
 function triggerLoadMidiConfig() { midiConfigInput.value?.click() }
 function onMidiConfigLoaded(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]; if (!file) return
   const reader = new FileReader()
   reader.onload = evt => {
     const text = evt.target?.result as string
-    // Let useMidiIn handle mappings + syncMode (tolerates extra keys).
-    midiIn.loadMappings(text)
-    // Parse once more here to pick up per-track MIDI OUT config if present.
-    try {
-      const data = JSON.parse(text)
-      if (!Array.isArray(data.tracks)) return
-      const byIndex = new Map<number, any>()
-      for (const e of data.tracks) {
-        if (typeof e?.index === 'number') byIndex.set(e.index, e)
-      }
-      tracks.value = tracks.value.map((t, i) => {
-        const src = byIndex.get(i); if (!src) return t
-        return {
-          ...t,
-          ...(typeof src.midiChannel  === 'number' ? { midiChannel:  clamp(src.midiChannel | 0, 1, 16) }   : {}),
-          ...(typeof src.midiNote     === 'number' ? { midiNote:     clamp(src.midiNote    | 0, 0, 127) } : {}),
-          ...(typeof src.midiVelocity === 'number' ? { midiVelocity: clamp(src.midiVelocity| 0, 1, 127) } : {}),
-          ...(typeof src.gateMs       === 'number' ? { gateMs:       clamp(src.gateMs      | 0, 10, 500) } : {}),
-        }
-      })
-    } catch { /* JSON parse errors already logged by midiIn.loadMappings */ }
+    let data: any = null
+    try { data = JSON.parse(text) } catch { console.error('Invalid JSON'); return }
+    // Apply only the categories the user ticked in the LOAD dialog.
+    if (midiLoadMapping.value) applyMappingSection(text, data)
+    if (midiLoadTracks.value)  applyTrackSection(data)
+    showMidiLoad.value = false
   }
   reader.readAsText(file); (e.target as HTMLInputElement).value = ''
 }
@@ -505,29 +566,27 @@ function onKitFileLoaded(e: Event) {
           <!-- 縦区切り -->
           <div class="w-px self-stretch bg-[#1e1e1e] my-0.5" />
 
-          <!-- MIDI OUT -->
-          <div class="flex items-center gap-1.5">
-            <span class="text-[10px] text-[#444]">MIDI OUT</span>
-            <select :value="midi.selectedId.value ?? ''"
-              class="bg-[#111] text-[#ccc] border border-[#222] text-[10px] py-[2px] px-[4px] min-w-[120px]"
-              :disabled="!midi.supported.value"
-              @change="midi.selectOutput(($event.target as HTMLSelectElement).value || null)">
-              <option value="">{{ midi.supported.value ? (midi.outputs.value.length ? '— none —' : '— no device —') : 'unsupported' }}</option>
-              <option v-for="o in midi.outputs.value" :key="o.id" :value="o.id" :title="o.name">{{ truncDeviceName(o.name) }}</option>
-            </select>
-          </div>
+          <!-- MIDI OUT — multi-device broadcast. All selected outs receive
+               the same note; receivers filter by channel. -->
+          <MidiDeviceMultiSelect
+            label="MIDI OUT"
+            :devices="midi.outputs.value"
+            :selected-ids="midi.selectedIds.value"
+            :disabled="!midi.supported.value"
+            @toggle="(id: string) => midi.toggleOutput(id)" />
 
-          <!-- MIDI IN -->
-          <div class="flex items-center gap-1.5">
-            <span class="text-[10px] text-[#444]">MIDI IN</span>
-            <select v-if="midiIn.state.supported" :value="midiIn.state.selectedId ?? ''"
-              class="bg-[#111] text-[#ccc] border border-[#222] text-[10px] py-[2px] px-[4px] min-w-[120px]"
-              @change="(e) => midiIn.selectInput((e.target as HTMLSelectElement).value || null)">
-              <option value="">— none —</option>
-              <option v-for="o in midiIn.state.inputs" :key="o.id" :value="o.id" :title="o.name">{{ truncDeviceName(o.name) }}</option>
-            </select>
-            <span v-else class="text-[10px] text-[#555]">unsupported</span>
-          </div>
+          <!-- MIDI IN — multi-device. Shared mapping table applies regardless
+               of origin; the ◷-marked chip is the clock source. -->
+          <MidiDeviceMultiSelect
+            label="MIDI IN"
+            :devices="midiIn.state.inputs.map((i: any) => ({ id: i.id, name: i.name || i.id }))"
+            :selected-ids="midiIn.state.selectedIds"
+            :clock-source="midiIn.state.clockSourceId"
+            :has-preset="hasMidiPresetForDevice"
+            :disabled="!midiIn.state.supported"
+            @toggle="(id: string) => midiIn.toggleInput(id)"
+            @set-clock-source="(id: string | null) => midiIn.setClockSource(id)"
+            @apply-preset="(id: string, name: string) => applyMidiPresetForDevice(id, name)" />
 
           <!-- Clock sync moved to row 1 (left of BPM). -->
 
@@ -546,17 +605,91 @@ function onKitFileLoaded(e: Event) {
             </button>
           </div>
 
-          <!-- MIDI SAVE / LOAD — always available. Stores MIDI IN mappings
-               + syncMode AND per-track MIDI OUT ch/note/vel/gate. Patterns
-               are untouched; use KIT SAVE/LOAD for those. -->
+          <!-- MIDI SAVE / LOAD — popover modals with per-category checkboxes
+               so track config and controller mappings can move independently. -->
           <div class="flex items-center gap-1">
             <span class="text-[10px] text-[#444]">MIDI</span>
-            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
-              title="Save MIDI mappings + per-track channel config"
-              @click="downloadMidiConfig">SAVE</button>
-            <button class="text-[9px] px-2 py-1 border border-[#333] bg-transparent text-[#666] rounded-sm hover:text-[#ccc]"
-              title="Load MIDI mappings + per-track channel config"
-              @click="triggerLoadMidiConfig">LOAD</button>
+
+            <!-- SAVE popover -->
+            <div class="relative">
+              <button
+                class="text-[9px] px-2 py-1 border rounded-sm tracking-[1px]"
+                :class="showMidiSave
+                  ? 'border-[#555] bg-[#1e1e1e] text-[#ddd]'
+                  : 'border-[#333] bg-transparent text-[#666] hover:text-[#ccc]'"
+                title="Save MIDI config — choose tracks / mappings / both"
+                @click.stop="showMidiSave = !showMidiSave; showMidiLoad = false">SAVE</button>
+              <div v-if="showMidiSave" class="fixed inset-0 z-[98]" @click="showMidiSave=false" />
+              <div v-if="showMidiSave"
+                class="absolute top-full left-0 mt-1 z-[99] bg-[#111] border border-[#333] rounded-sm px-3 py-2 shadow-xl min-w-[240px]"
+                @click.stop>
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-[9px] tracking-[2px] text-[#777]">MIDI SAVE</span>
+                  <button class="text-[10px] text-[#555] hover:text-[#ccc] leading-none px-1"
+                    @click="showMidiSave=false">✕</button>
+                </div>
+                <label class="flex items-center gap-2 text-[10px] text-[#ccc] py-0.5 cursor-pointer select-none">
+                  <input type="checkbox" class="accent-[#88aaee]" v-model="midiSaveTracks" />
+                  <span class="flex-1">TRACKS</span>
+                  <span class="text-[9px] text-[#555]">ch / note / vel / gate</span>
+                </label>
+                <label class="flex items-center gap-2 text-[10px] text-[#ccc] py-0.5 cursor-pointer select-none">
+                  <input type="checkbox" class="accent-[#88aaee]" v-model="midiSaveMapping" />
+                  <span class="flex-1">MAPPING</span>
+                  <span class="text-[9px] text-[#555]">learn / devices / clock</span>
+                </label>
+                <div class="mt-2 flex justify-end">
+                  <button
+                    class="text-[9px] px-2 py-[3px] border rounded-sm tracking-[1px]"
+                    :class="(midiSaveTracks || midiSaveMapping)
+                      ? 'border-[#336633] bg-[#182818] text-[#88cc88]'
+                      : 'border-[#333] bg-[#1a1a1a] text-[#555] cursor-not-allowed'"
+                    :disabled="!midiSaveTracks && !midiSaveMapping"
+                    @click="doMidiSave">↓ DOWNLOAD</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- LOAD popover -->
+            <div class="relative">
+              <button
+                class="text-[9px] px-2 py-1 border rounded-sm tracking-[1px]"
+                :class="showMidiLoad
+                  ? 'border-[#555] bg-[#1e1e1e] text-[#ddd]'
+                  : 'border-[#333] bg-transparent text-[#666] hover:text-[#ccc]'"
+                title="Load MIDI config — choose which categories to apply"
+                @click.stop="showMidiLoad = !showMidiLoad; showMidiSave = false">LOAD</button>
+              <div v-if="showMidiLoad" class="fixed inset-0 z-[98]" @click="showMidiLoad=false" />
+              <div v-if="showMidiLoad"
+                class="absolute top-full left-0 mt-1 z-[99] bg-[#111] border border-[#333] rounded-sm px-3 py-2 shadow-xl min-w-[240px]"
+                @click.stop>
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-[9px] tracking-[2px] text-[#777]">MIDI LOAD</span>
+                  <button class="text-[10px] text-[#555] hover:text-[#ccc] leading-none px-1"
+                    @click="showMidiLoad=false">✕</button>
+                </div>
+                <label class="flex items-center gap-2 text-[10px] text-[#ccc] py-0.5 cursor-pointer select-none">
+                  <input type="checkbox" class="accent-[#88aaee]" v-model="midiLoadTracks" />
+                  <span class="flex-1">TRACKS</span>
+                  <span class="text-[9px] text-[#555]">apply per-track MIDI</span>
+                </label>
+                <label class="flex items-center gap-2 text-[10px] text-[#ccc] py-0.5 cursor-pointer select-none">
+                  <input type="checkbox" class="accent-[#88aaee]" v-model="midiLoadMapping" />
+                  <span class="flex-1">MAPPING</span>
+                  <span class="text-[9px] text-[#555]">apply learn / devices / clock</span>
+                </label>
+                <div class="mt-2 flex justify-end">
+                  <button
+                    class="text-[9px] px-2 py-[3px] border rounded-sm tracking-[1px]"
+                    :class="(midiLoadTracks || midiLoadMapping)
+                      ? 'border-[#556677] bg-[#1a2a3a] text-[#aac]'
+                      : 'border-[#333] bg-[#1a1a1a] text-[#555] cursor-not-allowed'"
+                    :disabled="!midiLoadTracks && !midiLoadMapping"
+                    @click="triggerLoadMidiConfig">📁 SELECT FILE…</button>
+                </div>
+              </div>
+            </div>
+
             <input ref="midiConfigInput" type="file" accept=".json" style="display:none" @change="onMidiConfigLoaded" />
           </div>
 
@@ -579,6 +712,29 @@ function onKitFileLoaded(e: Event) {
                 : 'bg-transparent text-[#555] border-[#333] hover:text-[#aaa]'"
               title="Click to cycle rate (1/2 → 1/4 → 1/8 → 1/16)"
               @click="cycleRepeatRate">1/{{ repeatRate }}</button>
+          </div>
+
+          <!-- PAD VIEW — current effective view (MUTE / SOLO / REC).
+               Dimmer while idle; lights up + italicises while M or S is
+               held on the LC XL MK2 (temporary override). During
+               recording, the badge turns amber and the pads pulse in
+               sync with each track's playhead. -->
+          <div class="flex items-center gap-1 flex-shrink-0" title="Pad LED view (MUTE / SOLO / REC). Hold M or S on LC XL MK2 to temporarily switch. REC mode pulses amber on each step.">
+            <span class="text-[9px] text-[#444] tracking-[1px]">VIEW</span>
+            <span
+              class="text-[10px] px-2 py-[4px] border rounded-sm tracking-[1px] tabular-nums select-none"
+              :class="[
+                padViewIsTemporary ? 'italic' : '',
+                padViewMode === 'rec'
+                  ? 'bg-[#2a2010] text-[#ffcc66] border-[#aa7733] animate-pulse'
+                  : padViewMode === 'mute'
+                    ? (padViewIsTemporary
+                      ? 'bg-[#2a1a1a] text-[#ffbbbb] border-[#aa5555]'
+                      : 'bg-[#1a1010] text-[#cc8888] border-[#442222]')
+                    : (padViewIsTemporary
+                      ? 'bg-[#1a2a10] text-[#ddffaa] border-[#66aa44]'
+                      : 'bg-[#101a10] text-[#88cc88] border-[#224422]')
+              ]">{{ padViewMode === 'rec' ? 'REC' : padViewMode === 'mute' ? 'MUTE' : 'SOLO' }}</span>
           </div>
 
           <!-- ALL MUTE — right edge; solo-aware in the store -->
@@ -685,7 +841,7 @@ function onKitFileLoaded(e: Event) {
           <template v-if="selTrack()">
             <div class="font-semibold tracking-[1px] pb-1 border-b"
               :style="{ color: selTrack()!.color, borderColor: selTrack()!.color+'44' }">
-              {{ selTrack()!.name }} <span class="text-[#555] text-[9px]">{{ selTrack()!.timeSig }}</span>
+              {{ selTrack()!.name }} <span class="text-[#555] text-[9px]">{{ displaySig(selTrack()!) }}</span>
             </div>
 
             <!-- Meter knobs -->
@@ -810,7 +966,7 @@ function onKitFileLoaded(e: Event) {
             :style="{ color: detTrk()!.color }">
             {{ detTrk()!.name }}
           </span>
-          <span class="text-[10px] text-[#555]">{{ detTrk()!.timeSig }}</span>
+          <span class="text-[10px] text-[#555]">{{ displaySig(detTrk()!) }}</span>
           <!-- pending indicator -->
           <span v-if="pendQ[detailId!]?.length" class="text-[9px] text-[#ff9944]">
             {{ pendQ[detailId!].length }} queued →

@@ -346,7 +346,11 @@ NoteEvent パイプライン化（transform フック）は未着手だが、
 - **REC モード** — `useMidiIn` に `onNoteIn` / `onNoteOff` コールバックを追加
   （precedence: learn → mapped → `onNoteIn`）。store の `recordNote(ch, note)`
   が PLAY 中かつ REC アームド時に、マッチするトラックの現 step を toggle する
-  セルフ修正 overdub として動作。
+  セルフ修正 overdub として動作。共通 primitive `toggleTrackStepAtHead(idx)`
+  を切り出し、(1) MIDI IN 経由 (`recordNote`) と (2) 画面内の REC pad
+  （`recordStepAtHead(trackId)`、各トラック行で `v-if="recording"` ガード）
+  の 2 経路が同じロジックを通る。cowork-prompt.md Task B の要件どおり
+  ブラウザ単独でも打ち込み可能。
 - **パターンプリセット library** — `layers/core/public/patterns/` に JSON
   プリセットを同梱し、`usePatternPresets` composable がロード・適用を担う。
   **kit**（16 トラック丸ごと）と **line**（1 トラック分）の 2 モード、
@@ -355,9 +359,14 @@ NoteEvent パイプライン化（transform フック）は未着手だが、
   シリアライズする `serializeCurrentAsKit` を提供。
 - **Solo-aware ALL MUTE** — `allMuted` / `toggleAllMute` が solo トラックを
   除外するよう修正（`useSequencerStore.ts`）。
-- **MIDI config v2** — `downloadMidiConfig` / `onMidiConfigLoaded` は
-  mappings + syncMode に加えて per-track MIDI OUT（ch/note/vel/gate）も
-  同梱する拡張フォーマットへ。旧形式と後方互換。
+- **MIDI config v2（split save/load）** — `doMidiSave` / `onMidiConfigLoaded`
+  は TRACKS（per-track MIDI OUT: ch/note/vel/gate）と MAPPING（learn
+  mappings + syncMode + device selection + clock source）の 2 カテゴリを
+  独立にセーブ・ロードできる。SAVE/LOAD ボタンはチェックボックス付き
+  ポップオーバーで、`midi-config` / `midi-tracks` / `midi-mapping` の
+  3 フォーマットを吐き分ける。ロード時はファイル種別を問わずチェック
+  した項目だけが適用される。旧 `midi-config` v1/v2 コンバインド形式と
+  後方互換。
 
 NoteEvent パイプライン版プラグイン（`humanize` / `swing` / `flam` / `chord`
 / `probability` 等）は、上記機能が安定したら着手する予定。

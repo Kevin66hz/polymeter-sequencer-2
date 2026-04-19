@@ -1,0 +1,91 @@
+{
+  "_meta": {
+    "name": "Launch Control XL MK2 (User Template)",
+    "description": "Default mapping for Novation Launch Control XL MK2 running the custom User Template described in cowork-prompt.md §Task C. All messages on channel 1.",
+    "controller": "Novation Launch Control XL MK2",
+    "userTemplate": true,
+    "noteOctaveConvention": "Yamaha (middle C = C3 = MIDI 60). Novation Components editor uses this convention — confirmed by the D button labelled 'A6' sending MIDI note 105.",
+    "schemaVersion": 3
+  },
+
+  "mappings": [
+    { "controlId": "masterN",            "type": "cc",   "channel": 1, "number": 13 },
+    { "controlId": "masterD",            "type": "cc",   "channel": 1, "number": 14 },
+    { "controlId": "master_mode_toggle", "type": "cc",   "channel": 1, "number": 15 },
+
+    { "controlId": "bridge_length",      "type": "cc",   "channel": 1, "number": 16 },
+    { "controlId": "repeat_length",      "type": "cc",   "channel": 1, "number": 20 },
+
+    { "controlId": "track0_n",           "type": "cc",   "channel": 1, "number": 29 },
+    { "controlId": "track1_n",           "type": "cc",   "channel": 1, "number": 30 },
+    { "controlId": "track2_n",           "type": "cc",   "channel": 1, "number": 31 },
+    { "controlId": "track3_n",           "type": "cc",   "channel": 1, "number": 32 },
+    { "controlId": "track4_n",           "type": "cc",   "channel": 1, "number": 33 },
+    { "controlId": "track5_n",           "type": "cc",   "channel": 1, "number": 34 },
+    { "controlId": "track6_n",           "type": "cc",   "channel": 1, "number": 35 },
+    { "controlId": "track7_n",           "type": "cc",   "channel": 1, "number": 36 },
+
+    { "controlId": "track8_n",           "type": "cc",   "channel": 1, "number": 49 },
+    { "controlId": "track9_n",           "type": "cc",   "channel": 1, "number": 50 },
+    { "controlId": "track10_n",          "type": "cc",   "channel": 1, "number": 51 },
+    { "controlId": "track11_n",          "type": "cc",   "channel": 1, "number": 52 },
+    { "controlId": "track12_n",          "type": "cc",   "channel": 1, "number": 53 },
+    { "controlId": "track13_n",          "type": "cc",   "channel": 1, "number": 54 },
+    { "controlId": "track14_n",          "type": "cc",   "channel": 1, "number": 55 },
+    { "controlId": "track15_n",          "type": "cc",   "channel": 1, "number": 56 },
+
+    { "controlId": "fader_col0",         "type": "cc",   "channel": 1, "number": 77 },
+    { "controlId": "fader_col1",         "type": "cc",   "channel": 1, "number": 78 },
+    { "controlId": "fader_col2",         "type": "cc",   "channel": 1, "number": 79 },
+    { "controlId": "fader_col3",         "type": "cc",   "channel": 1, "number": 80 },
+    { "controlId": "fader_col4",         "type": "cc",   "channel": 1, "number": 81 },
+    { "controlId": "fader_col5",         "type": "cc",   "channel": 1, "number": 82 },
+    { "controlId": "fader_col6",         "type": "cc",   "channel": 1, "number": 83 },
+    { "controlId": "fader_col7",         "type": "cc",   "channel": 1, "number": 84 },
+
+    { "controlId": "snapshot_save",      "type": "cc",   "channel": 1, "number": 104 },
+    { "controlId": "repeat_trigger",     "type": "cc",   "channel": 1, "number": 105 },
+    { "controlId": "snapshot_recall",    "type": "cc",   "channel": 1, "number": 106 },
+    { "controlId": "master_apply",       "type": "cc",   "channel": 1, "number": 107 },
+
+    { "controlId": "track0_rec",         "type": "note", "channel": 1, "number": 41 },
+    { "controlId": "track1_rec",         "type": "note", "channel": 1, "number": 42 },
+    { "controlId": "track2_rec",         "type": "note", "channel": 1, "number": 43 },
+    { "controlId": "track3_rec",         "type": "note", "channel": 1, "number": 44 },
+    { "controlId": "track4_rec",         "type": "note", "channel": 1, "number": 57 },
+    { "controlId": "track5_rec",         "type": "note", "channel": 1, "number": 58 },
+    { "controlId": "track6_rec",         "type": "note", "channel": 1, "number": 59 },
+    { "controlId": "track7_rec",         "type": "note", "channel": 1, "number": 60 },
+
+    { "controlId": "track8_rec",         "type": "note", "channel": 1, "number": 73 },
+    { "controlId": "track9_rec",         "type": "note", "channel": 1, "number": 74 },
+    { "controlId": "track10_rec",        "type": "note", "channel": 1, "number": 75 },
+    { "controlId": "track11_rec",        "type": "note", "channel": 1, "number": 76 },
+    { "controlId": "track12_rec",        "type": "note", "channel": 1, "number": 89 },
+    { "controlId": "track13_rec",        "type": "note", "channel": 1, "number": 90 },
+    { "controlId": "track14_rec",        "type": "note", "channel": 1, "number": 91 },
+    { "controlId": "track15_rec",        "type": "note", "channel": 1, "number": 92 },
+
+    { "controlId": "mod_d",              "type": "note", "channel": 1, "number": 105 },
+    { "controlId": "mod_m",              "type": "note", "channel": 1, "number": 106 },
+    { "controlId": "mod_s",              "type": "note", "channel": 1, "number": 107 },
+    { "controlId": "mod_r",              "type": "note", "channel": 1, "number": 108 }
+  ],
+
+  "syncMode": "internal",
+  "selectedIds": [],
+  "clockSourceId": null,
+
+  "_notes": {
+    "knobRow1": "K[1,1]=masterN, K[1,2]=masterD, K[1,3]=mode toggle, K[1,4]=bridge (CC 16), K[1,5..7]=unassigned, K[1,8]=repeat rate.",
+    "knobRows2_3": "K[2,*]=tracks 1-8, K[3,*]=tracks 9-16. Default routes to N; holding D rewrites to the track's D knob in onCCMapped.",
+    "faders": "F[4,1..8] CC 77-84 = fader_col0..fader_col7. Pad-modal: routes to trackN_gate (10..500ms) of the held pad's track in the same column. Inactive unless (no M/S/D/R) AND (REC off) AND (some pad in that column held). Row 2 wins over row 1 when both held.",
+    "pads_row1": "P[1,1..8] = tracks 1-8. Notes 41..44 (F1, F#1, G1, G#1) and 57..60 (A2, A#2, B2, C3) in Yamaha labelling — matches the Novation Components editor's 'F1-C3' label for row 1. Non-contiguous on purpose: row 1 pads 1-4 are one chromatic run, pads 5-8 are a second run an octave up.",
+    "pads_row2": "P[2,1..8] = tracks 9-16. Notes 73..76 (C#4, D4, D#4, E4) and 89..92 (F5, F#5, G5, G#5) in Yamaha labelling — matches the editor's 'C#4-G#5' range for row 2. Same two-run layout as row 1, one full octave higher.",
+    "pads": "Bound to trackN_rec; store checks modifier state and rewrites to doMute / doSolo / doClr when M / S / D is held.",
+    "rightNav": "SS1 (CC 104)=Snapshot Save, rewritten to clearSnapshot when D is held; LED off when no snapshot exists. SS2 (CC 105)=Beat Repeat momentary. TS1 (CC 106)=Snapshot Recall (スナップショット APPLY, LED off when no snapshot). TS2 (CC 107)=Master Apply (Transition).",
+    "rightButtons": "D=A6 (note 105) / M=A#6 (note 106) / S=B6 (note 107) / R=C7 (note 108). Routed as mod_d/m/s/r through onModifierChange; tap and hold are distinguished inside useMidiModifiers.",
+    "chord_DM": "Pressing M while D is held fires ALL MUTE via onDMChord and suppresses both keys' tap actions on release.",
+    "octave_convention_note": "Note numbers above are raw MIDI. They match what Novation Components displays when its 'Note' dropdown uses the Yamaha convention (middle C = C3 = 60). Confirmed experimentally: pressing the D button, which the editor labels 'A6', emits MIDI note 105 (= A6 in Yamaha). Earlier versions of this file were off by 12 because they were written as if the editor used Scientific Pitch Notation (middle C = C4)."
+  }
+}
