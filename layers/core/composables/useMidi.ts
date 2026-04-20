@@ -17,10 +17,20 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 //
 // Usage (multi):
 //   const midi = useMidi()
-//   midi.setOutputs([id1, id2])           // replace selection
-//   midi.toggleOutput(id)                 // add / remove one
-//   midi.sendNoteOn(channel, note, vel)   // broadcast
+//   midi.setOutputs([id1, id2])                   // replace selection
+//   midi.toggleOutput(id)                         // add / remove one
+//   midi.sendNoteOn(channel, note, vel)           // broadcast (fire now)
 //   midi.sendNoteOff(channel, note)
+//   midi.sendNoteOn(channel, note, vel, perfMs)   // fire on OS queue at perfMs
+//   midi.sendNoteOff(channel, note, perfMs)
+//
+// Timestamped variant: passing `timestamp` forwards to `output.send(msg,
+// timestamp)`, which hands the message to the OS MIDI queue with sample-
+// accurate delivery. This is how the scheduler avoids main-thread jitter
+// on external hardware: it computes the perf-time at which the note
+// should fire and hands the message off ~100ms early, leaving the OS to
+// deliver it precisely. Omitting `timestamp` fires immediately (0), used
+// by panic and unmount cleanup.
 //
 // Implementation notes:
 // - Client-only: requestMIDIAccess lives behind onMounted so SSR doesn't choke.
@@ -165,21 +175,36 @@ export function useMidi() {
   // Broadcast sends: every selected output receives the same message. Loop
   // is inside a try-swallow per device so a single bad handle can't kill
   // the other devices mid-tick.
-  const sendNoteOn = (ch: number, note: number, vel = 100) => {
+  //
+  // Optional `timestamp` (performance.now()-clock milliseconds) forwards
+  // to the Web MIDI API's `output.send(msg, timestamp)` overload so the
+  // OS MIDI queue fires the message precisely at that instant rather
+  // than "as soon as the main thread notices". Pass it for scheduled
+  // notes; omit for immediate fires (panic, cleanup).
+  const sendNoteOn = (ch: number, note: number, vel = 100, timestamp?: number) => {
     if (currentOutputs.length === 0) return
     const msg = [0x90 | clampCh(ch), clamp7(note), clamp7(vel)]
-    for (const out of currentOutputs) { try { out.send(msg) } catch {} }
+    for (const out of currentOutputs) {
+      try { timestamp !== undefined ? out.send(msg, timestamp) : out.send(msg) } catch {}
+    }
   }
 
-  const sendNoteOff = (ch: number, note: number) => {
+  const sendNoteOff = (ch: number, note: number, timestamp?: number) => {
     if (currentOutputs.length === 0) return
     const msg = [0x80 | clampCh(ch), clamp7(note), 0]
-    for (const out of currentOutputs) { try { out.send(msg) } catch {} }
+    for (const out of currentOutputs) {
+      try { timestamp !== undefined ? out.send(msg, timestamp) : out.send(msg) } catch {}
+    }
   }
 
+  // Panic: cancel anything the OS queue hasn't yet delivered (Chrome/
+  // Firefox support MIDIOutput.clear()) and then force All Notes Off
+  // on every channel. clear() is best-effort — a fallback path is fine
+  // because the subsequent All Notes Off will silence whatever leaks.
   const panic = () => {
     if (currentOutputs.length === 0) return
     for (const out of currentOutputs) {
+      try { typeof out.clear === 'function' && out.clear() } catch {}
       for (let ch = 0; ch < 16; ch++) { try { out.send([0xb0 | ch, 123, 0]) } catch {} }
     }
   }

@@ -158,14 +158,23 @@ export function useSequencerStore() {
 
   // ── MIDI (out) ──────────────────────────────────────────────────────
   const midi = useMidi()
-  const midiFireRef: { current: ((id: number) => void) | null } = { current: null }
-  midiFireRef.current = (id) => {
+  // midiFireRef signature: (id, _audioTime, perfTime). The scheduler
+  // computes perfTime via its clock-bridge (getOutputTimestamp()) and
+  // hands it to us so note-on / note-off can both be scheduled on the
+  // OS MIDI queue with sample-accurate delivery. No setTimeout on the
+  // MIDI path — main-thread jitter is out of the loop entirely.
+  //
+  // audioTime is retained for future Audio-path plugins (the `onStep`
+  // contract from the design philosophy memo); unused today.
+  const midiFireRef: { current: ((id: number, audioTime: number, perfTime: number) => void) | null } = { current: null }
+  midiFireRef.current = (id, _audioTime, perfTime) => {
     // Multi-OUT: gate on the array length — send* internally broadcasts to
     // every selected device, so we only need to ensure at least one is up.
     if (!midi.selectedIds.value.length) return
     const trk = tracksRaw.current[id]; if (!trk) return
-    midi.sendNoteOn(trk.midiChannel, trk.midiNote, trk.midiVelocity ?? 100)
-    setTimeout(() => midi.sendNoteOff(trk.midiChannel, trk.midiNote), trk.gateMs ?? 80)
+    const gate = trk.gateMs ?? 80
+    midi.sendNoteOn(trk.midiChannel, trk.midiNote, trk.midiVelocity ?? 100, perfTime)
+    midi.sendNoteOff(trk.midiChannel, trk.midiNote, perfTime + gate)
   }
 
   // ── MIDI (in) ───────────────────────────────────────────────────────

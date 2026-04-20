@@ -32,7 +32,11 @@ export type SchedulerDeps = {
   pendingRaw: { current: Pending[][] }
   displayHeads: { current: number[] }
   applyFnRef: { current: ((id: number, p: Pending) => void) | null }
-  midiFireRef: { current: ((id: number) => void) | null }
+  // midiFireRef: called with (id, audioTime, perfTime) — audioTime is the
+  // scheduler's AudioContext-clock time for the step (seconds); perfTime
+  // is the same instant translated to the performance.now() clock (ms)
+  // so the MIDI path can hand it straight to MIDIOutput.send().
+  midiFireRef: { current: ((id: number, audioTime: number, perfTime: number) => void) | null }
   audioEnabledRef: { current: boolean }
   masterTargetRef: { current: string | null }
   onHeadsTick: (heads: number[]) => void
@@ -65,6 +69,38 @@ export function createScheduler(deps: SchedulerDeps) {
   let timerWorker: Worker | null = null
   let intervalId: ReturnType<typeof setInterval> | null = null
   let rafId: number | null = null
+
+  // ── Clock bridging (AudioContext time ↔ performance.now() time) ─────
+  // AudioContext.currentTime is seconds on the audio clock; MIDIOutput.send
+  // expects a DOMHighResTimeStamp in milliseconds on the performance.now()
+  // clock. We bridge the two once, then cache the offset:
+  //
+  //   offsetMs = performanceTime - contextTime * 1000
+  //   perfMs(audioSec) = audioSec * 1000 + offsetMs
+  //
+  // getOutputTimestamp() is the only API that samples both clocks
+  // atomically. We refresh the offset every OFFSET_RESAMPLE_MS to catch
+  // drift between the audio and perf clocks on long sessions.
+  let ctxPerfOffsetMs = 0
+  let lastOffsetSampleAt = 0
+  const OFFSET_RESAMPLE_MS = 1000
+
+  const refreshClockOffset = () => {
+    if (!ctx || typeof (ctx as any).getOutputTimestamp !== 'function') return
+    try {
+      const ts = (ctx as any).getOutputTimestamp()
+      if (typeof ts?.contextTime === 'number' && typeof ts?.performanceTime === 'number') {
+        ctxPerfOffsetMs = ts.performanceTime - ts.contextTime * 1000
+        lastOffsetSampleAt = performance.now()
+      }
+    } catch { /* ignore — fall back to stale offset */ }
+  }
+
+  const ctxTimeToPerfMs = (audioSec: number): number => {
+    const now = performance.now()
+    if (now - lastOffsetSampleAt > OFFSET_RESAMPLE_MS) refreshClockOffset()
+    return audioSec * 1000 + ctxPerfOffsetMs
+  }
   // `step` is the REAL playhead — it always advances one step per tick
   // regardless of beat-repeat. `repeatLoopStart` is the origin of the
   // trigger-side loop while REP is on; null means "mirror the real
@@ -101,14 +137,31 @@ export function createScheduler(deps: SchedulerDeps) {
     if (!trk) return
     const anySolo = tracksRaw.current.some((t) => t.solo)
     const ok = !trk.mute && (!anySolo || trk.solo) && trk.steps[si]
-    const ms = Math.max(0, (time - (ctx?.currentTime ?? 0)) * 1000)
+
+    // Audio + MIDI paths are scheduled on their NATIVE clocks, not via
+    // setTimeout. Main-thread jitter (GC, Vue re-renders, layout) is
+    // therefore out of the note-timing loop entirely — that is the core
+    // win of this refactor for external hardware (Digitakt, etc.) over
+    // long sessions.
+    //
+    //   audio.trigger(ctx, id, time)     — Web Audio renders at `time`.
+    //   midiFireRef(id, time, perfMs)    — OS MIDI queue fires at perfMs.
+    //
+    // displayHeads is the only surviving setTimeout hop: the visual
+    // playhead doesn't need ±1ms precision, and the setTimeout lets the
+    // UI RAF loop observe a consistent per-tick snapshot instead of a
+    // mid-tick race.
+    if (ok) {
+      if (audioEnabledRef.current && ctx) audio.trigger(ctx, id, time)
+      const perfMs = ctxTimeToPerfMs(time)
+      midiFireRef.current?.(id, time, perfMs)
+    }
+
+    const nowCtx = ctx?.currentTime ?? 0
+    const ms = Math.max(0, (time - nowCtx) * 1000)
     setTimeout(() => {
       if (!running) return
       displayHeads.current[id] = si
-      if (ok) {
-        if (audioEnabledRef.current && ctx) audio.trigger(ctx, id)
-        midiFireRef.current?.(id)
-      }
     }, ms)
   }
 
@@ -264,6 +317,11 @@ export function createScheduler(deps: SchedulerDeps) {
     if (running) return
     if (!ctx) ctx = new AudioContext()
     if (ctx.state === 'suspended') ctx.resume()
+    // Prime the clock offset before the first sched() call so the very
+    // first MIDI note goes out with an accurate perfTime (rather than
+    // offset=0 which would land hundreds of ms in the past and force
+    // the OS queue to "fire immediately", defeating the look-ahead).
+    refreshClockOffset()
     const now = ctx.currentTime
     trackState = tracksRaw.current.map(() => ({ step: 0, nextTime: now + 0.05, repeatLoopStart: null }))
     displayHeads.current = Array(TRACK_COUNT).fill(0)
