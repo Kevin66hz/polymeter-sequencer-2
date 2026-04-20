@@ -127,7 +127,10 @@ export function createScheduler(deps: SchedulerDeps) {
   const tick = () => {
     if (!running || !ctx) return
     const now = ctx.currentTime
-    const ah = 0.15
+    // Look-ahead window: Worker timer reduces tick jitter to ~5-10ms so
+    // 100ms provides ample buffer while keeping mute/step-edit latency
+    // tighter than the previous 150ms value.
+    const ah = 0.10
 
     // Snapshot REP state at tick start. Reading `.current` directly on
     // every iteration would be fine too; tick boundary is convenient and
@@ -225,7 +228,19 @@ export function createScheduler(deps: SchedulerDeps) {
           new URL('./timer-worker.ts', import.meta.url),
           { type: 'module' },
         )
-        timerWorker.onmessage = () => { if (running) tick() }
+        // Burst deduplication: if the main thread was busy and multiple
+        // Worker messages queued up, process only the first one — tick()'s
+        // while-loop already catches up to `now + ah` in a single call, so
+        // extra back-to-back ticks just add GC pressure without scheduling
+        // any additional events.
+        let lastTickAt = 0
+        timerWorker.onmessage = () => {
+          if (!running) return
+          const now = performance.now()
+          if (now - lastTickAt < 15) return   // skip burst duplicates
+          lastTickAt = now
+          tick()
+        }
         timerWorker.postMessage(25)
         return
       } catch {

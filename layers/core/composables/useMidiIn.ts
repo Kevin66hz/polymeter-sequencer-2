@@ -1,4 +1,4 @@
-import { reactive, toRaw } from 'vue'
+import { reactive, toRaw, watch } from 'vue'
 
 // ── MIDI Input: external controller support ────────────────────────
 //
@@ -130,15 +130,18 @@ export const MODIFIER_CONTROL_IDS = new Set<string>([
 ])
 
 // Toggle to get verbose console output for note-on / modifier routing.
-// On by default while debugging the LC XL MK2 flow — flip to false once
-// the D/M/S/R dispatch is confirmed stable in your environment. Reads a
-// browser-global override so the user can silence logs without a rebuild:
+// Off by default — D/M/S/R dispatch is stable, and leaving logging on
+// during long sessions with external controllers causes steady main-
+// thread drift (Chrome retains console entries forever, and at 16ths
+// on a drum controller we emit dozens of `console.info` per second).
+// Flip via localStorage when debugging a new controller or mapping:
 //
-//   localStorage.setItem('poly-seq:midi-debug', '0')
+//   localStorage.setItem('poly-seq:midi-debug', '1')  // force ON
+//   localStorage.setItem('poly-seq:midi-debug', '0')  // force OFF
 //
-// Any truthy value in that key forces verbose logging on; '0' forces it
-// off. Missing key falls back to the default below.
-const MIDI_IN_DEBUG_DEFAULT = true
+// Any truthy value forces on; '0' / '' / 'false' forces off. Missing
+// key falls back to MIDI_IN_DEBUG_DEFAULT below.
+const MIDI_IN_DEBUG_DEFAULT = false
 const MIDI_IN_DEBUG = (() => {
   try {
     if (typeof localStorage === 'undefined') return MIDI_IN_DEBUG_DEFAULT
@@ -211,14 +214,58 @@ export function useMidiIn(callbacks: {
   // Only the input that matches state.clockSourceId contributes pulses —
   // accepting 0xF8 from every selected input would corrupt the rolling
   // average since two clock streams would be interleaved.
+  //
+  // Implementation: fixed-size ring buffer + running sum. At 24 PPQN ×
+  // ~120 BPM we process ~48 pulses/sec on the main thread (same thread
+  // that runs the scheduler tick), so the previous pattern of
+  // `Array.shift()` (O(24) memmove) + `Array.reduce(+)` (24 adds) per
+  // pulse added up. The ring updates in O(1): subtract the slot we're
+  // about to overwrite, write the new value, add it to the sum. The
+  // pre-filled zeroes mean the same arithmetic works during the initial
+  // fill — the `count` guard below keeps the BPM calc correct.
   const CLOCK_WINDOW = 24
-  const clockIntervals: number[] = []
+  const clockRing: number[] = new Array(CLOCK_WINDOW).fill(0)
+  let clockRingIdx = 0     // next write slot
+  let clockRingCount = 0   // filled slots, caps at CLOCK_WINDOW
+  let clockRingSum = 0     // running sum of the filled slots
   let lastClockTimestamp = 0
 
   const resetClockTracking = () => {
-    clockIntervals.length = 0
+    for (let i = 0; i < CLOCK_WINDOW; i++) clockRing[i] = 0
+    clockRingIdx = 0
+    clockRingCount = 0
+    clockRingSum = 0
     lastClockTimestamp = 0
   }
+
+  // ── Mapping index ─────────────────────────────────
+  // O(1) trigger lookup keyed by "type|channel|number". Rebuilt whenever
+  // state.mappings changes (rare — Learn, removeMapping, loadMappings).
+  // Callers inside the per-message hot path (handleNote, handleCC, the
+  // note-off branch) use this instead of Array.find so heavy controller
+  // traffic doesn't linear-scan 60+ mapping entries per message.
+  //
+  // First-match-wins: if two mappings somehow share the same trigger
+  // tuple (possible if the user Learn-binds two controls from the same
+  // pad), the older entry is kept — matching the previous Array.find
+  // semantics. Same-controlId collisions can't happen because
+  // recordMapping splices any prior entry with that controlId before
+  // pushing the new one.
+  const mappingIndex = new Map<string, MidiMapping>()
+  const mappingKey = (type: 'cc' | 'note', ch: number, num: number) =>
+    `${type}|${ch}|${num}`
+  const rebuildMappingIndex = () => {
+    mappingIndex.clear()
+    for (const m of state.mappings) {
+      const k = mappingKey(m.type, m.channel, m.number)
+      if (!mappingIndex.has(k)) mappingIndex.set(k, m)
+    }
+  }
+  // deep: true so in-place mutations (splice in recordMapping /
+  // removeMapping) trigger rebuild, not just array-replacement writes.
+  // immediate: true primes the index with whatever mappings loaded from
+  // persistence before the first MIDI message arrives.
+  watch(() => state.mappings, rebuildMappingIndex, { deep: true, immediate: true })
 
   const init = async () => {
     if (!navigator.requestMIDIAccess) {
@@ -380,9 +427,7 @@ export function useMidiIn(callbacks: {
     //  c) unmapped → pass through as onNoteOff for beat-repeat etc.
     const isNoteOff = msgType === 0x80 || (msgType === 0x90 && data2 === 0)
     if (isNoteOff) {
-      const mapped = state.mappings.find(
-        m => m.type === 'note' && m.channel === channel && m.number === data1
-      )
+      const mapped = mappingIndex.get(mappingKey('note', channel, data1))
       if (mapped && MODIFIER_CONTROL_IDS.has(mapped.controlId)) {
         const modId = mapped.controlId.slice(4) as 'd' | 'm' | 's' | 'r'
         callbacks.onModifierChange?.(modId, false)
@@ -401,13 +446,23 @@ export function useMidiIn(callbacks: {
       const intervalSec = (timestamp - lastClockTimestamp) / 1000
       // Sanity: ignore intervals outside reasonable BPM range (20–400)
       if (intervalSec > 0.001 && intervalSec < 0.3) {
-        clockIntervals.push(intervalSec)
-        if (clockIntervals.length > CLOCK_WINDOW) clockIntervals.shift()
+        // O(1) ring update: swap out the oldest sample, patch the sum.
+        const old = clockRing[clockRingIdx]
+        clockRing[clockRingIdx] = intervalSec
+        clockRingSum += intervalSec - old
+        clockRingIdx = (clockRingIdx + 1) % CLOCK_WINDOW
+        if (clockRingCount < CLOCK_WINDOW) clockRingCount++
 
-        if (clockIntervals.length >= 4 && state.syncMode === 'external') {
-          const avg = clockIntervals.reduce((a, b) => a + b) / clockIntervals.length
+        if (clockRingCount >= 4 && state.syncMode === 'external') {
+          const avg = clockRingSum / clockRingCount
           // 24 PPQN → BPM = 60 / (avg × 24)
-          state.syncBpm = Math.round(60 / (avg * 24))
+          const newBpm = Math.round(60 / (avg * 24))
+          // Skip the reactive write when the rounded integer didn't
+          // move. Vue's Proxy setter also short-circuits equal writes,
+          // but the early-out spares the setter call + the downstream
+          // `syncBpm` watcher's equality check too, which matters at
+          // ~48 pulses/sec.
+          if (newBpm !== state.syncBpm) state.syncBpm = newBpm
         }
       }
     }
@@ -436,9 +491,7 @@ export function useMidiIn(callbacks: {
       state.learnControlId = null
       return
     }
-    const mapping = state.mappings.find(
-      m => m.type === 'note' && m.channel === channel && m.number === note
-    )
+    const mapping = mappingIndex.get(mappingKey('note', channel, note))
     if (mapping) {
       if (MIDI_IN_DEBUG) console.info(`[midi-in] note-on ch${channel} #${note} vel${velocity} → ${mapping.controlId}`)
       triggerControl(mapping.controlId, velocity)
@@ -456,9 +509,7 @@ export function useMidiIn(callbacks: {
       state.learnControlId = null
       return
     }
-    const mapping = state.mappings.find(
-      m => m.type === 'cc' && m.channel === channel && m.number === cc
-    )
+    const mapping = mappingIndex.get(mappingKey('cc', channel, cc))
     if (mapping) {
       triggerControl(mapping.controlId, value)
     }
