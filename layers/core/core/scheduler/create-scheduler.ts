@@ -26,12 +26,32 @@ import { stepDur } from '#core/pure/meter'
 import { applyPending } from '#core/pure/pending'
 import { defaultAudioAdapter, type AudioAdapter } from '#core/adapters/audio'
 
+// External-clock phase reference. Mirrored from midiIn.state each time an
+// F8 pulse / 0xFA start is received. The scheduler reads this in tick() to
+// drive the phase corrector (see applyPhaseCorrection). Lives outside Vue
+// reactivity on purpose — writes happen at ~48Hz and we don't want any
+// render effects depending on it.
+export type ClockSyncSnapshot = {
+  syncMode: 'internal' | 'external'
+  // F8 pulses since last 0xFA (Start). Continue (0xFB) doesn't reset it.
+  pulseCount: number
+  // perf.now() timestamp of most recent F8 pulse.
+  lastPulsePerfTime: number
+  // perf.now() timestamp of most recent 0xFA (Start).
+  startPerfTime: number
+}
+
 export type SchedulerDeps = {
   bpmRaw: { current: number }
   tracksRaw: { current: Track[] }
   pendingRaw: { current: Pending[][] }
   displayHeads: { current: number[] }
   applyFnRef: { current: ((id: number, p: Pending) => void) | null }
+  // External-clock phase tracker. When syncMode==='external' the scheduler
+  // periodically compares the master's actual pulse phase against its own
+  // predicted step boundary and corrects trackState[*].nextTime. In
+  // internal mode this is just ignored.
+  clockSyncRaw?: { current: ClockSyncSnapshot }
   // midiFireRef: called with (id, audioTime, perfTime) — audioTime is the
   // scheduler's AudioContext-clock time for the step (seconds); perfTime
   // is the same instant translated to the performance.now() clock (ms)
@@ -41,6 +61,12 @@ export type SchedulerDeps = {
   masterTargetRef: { current: string | null }
   onHeadsTick: (heads: number[]) => void
   onMasterReset: () => void
+  // Optional: cumulative startup nudge (ms). Applied once on each play()
+  // right after the initial nextTime anchor is set, so a user-tuned MIDI
+  // output offset persists across play/stop cycles and survives page
+  // reload (the store persists it to localStorage). Live nudges during
+  // playback go through the returned `nudge()` method.
+  startupNudgeMsRef?: { current: number }
   // Optional: beat-repeat. While `repeatOnRef.current` is true, the
   // trigger step loops inside a `repeatStepsRef.current`-long window
   // (aligned to that length) while the real playhead keeps advancing
@@ -90,6 +116,12 @@ export function createScheduler(deps: SchedulerDeps) {
     try {
       const ts = (ctx as any).getOutputTimestamp()
       if (typeof ts?.contextTime === 'number' && typeof ts?.performanceTime === 'number') {
+        // Guard against stale samples taken before the audio context has
+        // actually started rendering. `ctx.resume()` is async, so a
+        // sample immediately after play() would return contextTime = 0
+        // and yield offsetMs = performanceTime (huge, bogus). Skip those
+        // — the caller will retry on the next tick once ctx is warm.
+        if (ts.contextTime <= 0) return
         ctxPerfOffsetMs = ts.performanceTime - ts.contextTime * 1000
         lastOffsetSampleAt = performance.now()
       }
@@ -112,6 +144,99 @@ export function createScheduler(deps: SchedulerDeps) {
   }[] = []
   let running = false
   let masterResetArmed = false
+  // `play()` is synchronous but `ctx.resume()` isn't. Deferring nextTime
+  // init and the first getOutputTimestamp() sample to the first tick
+  // where `ctx.state === 'running'` avoids two startup bugs:
+  //   1. Bogus offsetMs (sampled while contextTime = 0) would fire MIDI
+  //      notes ~performanceTime ms in the future, i.e. ~now, while audio
+  //      still has to wait for ctx.resume() → MIDI ahead, audio late.
+  //   2. nextTime = ctx.currentTime + 0.05 computed pre-resume is anchored
+  //      to a clock that hasn't advanced; by the time it does, nextTime
+  //      is already in the past and we fire-immediately on the first tick.
+  let ticksInitialized = false
+
+  // ── Phase corrector (external clock) ─────────────────
+  // Closes the ctx.resume()-induced startup offset AND any slow drift.
+  //   - HARD snap: one-shot, ~2 bars after Start. Clamp ±500ms — enough
+  //     for any plausible ctx.resume() latency.
+  //   - SOFT nudge: periodic every 1 bar, 20% of error, clamp ±10ms.
+  //
+  // Correction is FULL PHASE, not modulo-wrapped. The prior version
+  // wrapped into [-dur/2, +dur/2) which aligned the seq to the NEAREST
+  // step boundary — fine when startup offset < dur/2, but for offsets
+  // larger than half a step (common on ctx.resume()) it locked onto
+  // the WRONG step, producing a 1-step pattern shift that sounded OK
+  // at ~110 BPM (where a step lag is inaudible on symmetric patterns)
+  // and increasingly wrong at other tempi.
+  //
+  // Full-phase formula, robust across BPM changes:
+  //
+  //     seqStepAtMasterIdx = nextTime_perf + (masterStepIdx − stepsAdvanced)·durMs
+  //     correction         = masterPerfMs − seqStepAtMasterIdx
+  //
+  // The formula references the CURRENT nextTime and the current durMs,
+  // so a BPM change mid-song doesn't break the calculation — we're
+  // just asking "given where seq is now and the current tempo, where
+  // does it predict pulse P's step to be, and where did master actually
+  // put it?". No accumulated-history term to drift.
+  const INITIAL_SNAP_PULSES = 192   // 2 bars at 24 PPQN × 4 beats
+  const SOFT_NUDGE_PULSES = 96      // 1 bar
+  const HARD_CLAMP_MS = 500
+  const SOFT_CLAMP_MS = 10
+  const SOFT_STRENGTH = 0.2
+  let initialPhaseDone = false
+  let lastCorrectionPulse = 0
+  // Track 0's total step fires since play(). NOT reduced mod track.length
+  // — logical step counter for the phase corrector. Bumped in tick()'s
+  // inner loop right after `trackState[0].nextTime += dur`, so at any
+  // moment `nextTime` points to the (stepsAdvanced)-th step (0-indexed).
+  let stepsAdvanced = 0
+
+  const applyPhaseCorrection = (
+    masterPerfMs: number,
+    pulseCount: number,
+    mode: 'hard' | 'soft',
+  ) => {
+    if (!ticksInitialized || !ctx || ctx.state !== 'running') return
+    if (trackState.length === 0) return
+    const durMs = stepDur(bpmRaw.current) * 1000
+    if (durMs <= 0) return
+    // Step index that master's current pulse corresponds to. Pulse P is
+    // at master's (P/6)-th 16th-note boundary; exact ratio preserves
+    // sub-step phase info if tick() catches pulseCount mid-step.
+    const masterStepIdx = pulseCount / 6
+    // Seq's nextTime refers to the (stepsAdvanced)-th step. Project
+    // backwards/forwards by (masterStepIdx - stepsAdvanced) steps to
+    // find where seq predicts master's current step to fire.
+    const nextTimePerfMs = trackState[0].nextTime * 1000 + ctxPerfOffsetMs
+    const seqStepAtMasterIdxPerfMs =
+      nextTimePerfMs + (masterStepIdx - stepsAdvanced) * durMs
+    // Full phase error. Sign: error > 0 means master's pulse is LATER
+    // than seq's predicted step for that index → seq is EARLY → delay.
+    let corrMs = masterPerfMs - seqStepAtMasterIdxPerfMs
+    const strength = mode === 'hard' ? 1.0 : SOFT_STRENGTH
+    const clampMs = mode === 'hard' ? HARD_CLAMP_MS : SOFT_CLAMP_MS
+    corrMs = corrMs * strength
+    if (corrMs > clampMs) corrMs = clampMs
+    if (corrMs < -clampMs) corrMs = -clampMs
+    const corrSec = corrMs / 1000
+    for (let i = 0; i < trackState.length; i++) {
+      trackState[i].nextTime += corrSec
+    }
+  }
+
+  // Manual nudge. Shifts all tracks' nextTime by `ms` (±). Used by the
+  // UI NUDGE buttons to let the user hand-dial any residual MIDI-output
+  // latency vs Digitakt's internal trigger path. Additive — successive
+  // nudges stack. Safe to call before ticksInitialized (it simply shifts
+  // the placeholder 0s — first real anchor in tick() will reset them).
+  const nudge = (ms: number) => {
+    if (!Number.isFinite(ms) || ms === 0) return
+    const sec = ms / 1000
+    for (let i = 0; i < trackState.length; i++) {
+      trackState[i].nextTime += sec
+    }
+  }
 
   // Given the real step, the loop origin, the requested loop length and
   // the track length, return which step should actually TRIGGER. When
@@ -179,6 +304,53 @@ export function createScheduler(deps: SchedulerDeps) {
 
   const tick = () => {
     if (!running || !ctx) return
+    // Wait until the context has actually resumed. Chrome on macOS can
+    // take 100-300ms between `ctx.resume()` returning (it's async) and
+    // the audio thread actually starting to render. During that window
+    // `ctx.currentTime` stays at 0 and `getOutputTimestamp()` returns
+    // zeroes — useless for scheduling. Ticks that arrive in that window
+    // just no-op; the Worker's 25ms interval keeps polling.
+    if (ctx.state !== 'running') return
+    // First running tick: anchor nextTime to the freshly-rendered clock
+    // and take the initial offset sample. Doing this here (not in play())
+    // guarantees contextTime > 0 and that the offset reflects the real
+    // audio clock, so the very first MIDI note lines up with the very
+    // first audio note.
+    if (!ticksInitialized) {
+      refreshClockOffset()
+      const start = ctx.currentTime + 0.05
+      for (let i = 0; i < trackState.length; i++) {
+        trackState[i].nextTime = start
+      }
+      // Apply persisted startup nudge (user's saved MIDI-output offset).
+      // Reading at this point — AFTER the anchor — means the next tick
+      // sees the offset baked into nextTime and fires accordingly.
+      const startupNudgeMs = deps.startupNudgeMsRef?.current ?? 0
+      if (startupNudgeMs !== 0) {
+        const startupNudgeSec = startupNudgeMs / 1000
+        for (let i = 0; i < trackState.length; i++) {
+          trackState[i].nextTime += startupNudgeSec
+        }
+      }
+      ticksInitialized = true
+    }
+    // Phase corrector — only meaningful under external sync. We read the
+    // snapshot directly (no Vue reactivity) and apply a correction to all
+    // tracks' nextTime so the master's step-boundary pulse coincides with
+    // our step fire. See applyPhaseCorrection for the sign convention.
+    const cs = deps.clockSyncRaw?.current
+    if (cs && cs.syncMode === 'external' && cs.pulseCount > 0 && cs.lastPulsePerfTime > 0) {
+      if (!initialPhaseDone) {
+        if (cs.pulseCount >= INITIAL_SNAP_PULSES) {
+          applyPhaseCorrection(cs.lastPulsePerfTime, cs.pulseCount, 'hard')
+          initialPhaseDone = true
+          lastCorrectionPulse = cs.pulseCount
+        }
+      } else if (cs.pulseCount - lastCorrectionPulse >= SOFT_NUDGE_PULSES) {
+        applyPhaseCorrection(cs.lastPulsePerfTime, cs.pulseCount, 'soft')
+        lastCorrectionPulse = cs.pulseCount
+      }
+    }
     const now = ctx.currentTime
     // Look-ahead window: Worker timer reduces tick jitter to ~5-10ms so
     // 100ms provides ample buffer while keeping mute/step-edit latency
@@ -218,6 +390,11 @@ export function createScheduler(deps: SchedulerDeps) {
         // what the UI highlights. The real step keeps marching below.
         sched(i, triggerSi, trackState[i].nextTime)
         trackState[i].nextTime += dur
+        // Track 0 drives the phase corrector's reference frame. After
+        // bumping its nextTime, log that we've advanced one more step so
+        // the formula "nextTime + (masterStepIdx − stepsAdvanced)·dur"
+        // stays coherent with the just-advanced nextTime.
+        if (i === 0) stepsAdvanced++
 
         const nextReal = (realSi + 1) % len
         trackState[i].step = nextReal
@@ -317,15 +494,20 @@ export function createScheduler(deps: SchedulerDeps) {
     if (running) return
     if (!ctx) ctx = new AudioContext()
     if (ctx.state === 'suspended') ctx.resume()
-    // Prime the clock offset before the first sched() call so the very
-    // first MIDI note goes out with an accurate perfTime (rather than
-    // offset=0 which would land hundreds of ms in the past and force
-    // the OS queue to "fire immediately", defeating the look-ahead).
-    refreshClockOffset()
-    const now = ctx.currentTime
-    trackState = tracksRaw.current.map(() => ({ step: 0, nextTime: now + 0.05, repeatLoopStart: null }))
+    // NOTE: we do NOT sample the clock offset here nor compute nextTime.
+    // `ctx.resume()` is async on Chrome/macOS (100-300ms until the audio
+    // thread actually renders), so any timing derived from the current
+    // ctx here is bogus. The first tick() with `ctx.state === 'running'`
+    // does the real init — see `ticksInitialized` above. `nextTime: 0`
+    // is a placeholder and never reaches sched() because tick() short-
+    // circuits until ctx is warm.
+    trackState = tracksRaw.current.map(() => ({ step: 0, nextTime: 0, repeatLoopStart: null }))
     displayHeads.current = Array(TRACK_COUNT).fill(0)
     masterResetArmed = false
+    ticksInitialized = false
+    initialPhaseDone = false
+    lastCorrectionPulse = 0
+    stepsAdvanced = 0
     running = true
     startTimer()
     rafId = requestAnimationFrame(rafLoop)
@@ -336,6 +518,10 @@ export function createScheduler(deps: SchedulerDeps) {
     stopTimer()
     if (rafId) { cancelAnimationFrame(rafId); rafId = null }
     masterResetArmed = false
+    ticksInitialized = false
+    initialPhaseDone = false
+    lastCorrectionPulse = 0
+    stepsAdvanced = 0
     displayHeads.current = Array(TRACK_COUNT).fill(-1)
     onHeadsTick(Array(TRACK_COUNT).fill(-1))
   }
@@ -345,5 +531,26 @@ export function createScheduler(deps: SchedulerDeps) {
     if (ctx) { ctx.close().catch(() => {}); ctx = null }
   }
 
-  return { play, stop, dispose, isRunning: () => running }
+  // External-clock sync, recap:
+  //
+  // In external mode the scheduler still runs its own internal look-ahead
+  // loop — step firing is NOT driven by incoming F8 pulses. Instead:
+  //
+  //   1. TEMPO: host reflects `midiIn.state.syncBpm` (rolling 24-pulse
+  //      average) into `bpmRaw`. tick() consumes it via `stepDur()`.
+  //   2. PHASE: host reflects pulse/start timestamps into `clockSyncRaw`.
+  //      tick() runs a two-stage PLL against them:
+  //        - 1 hard snap at 2 bars (closes ctx.resume() startup gap,
+  //          typically ~1 step at 110 BPM)
+  //        - Periodic 20% soft nudges every bar thereafter (clamp ±10ms;
+  //          remaining error low-passes in over the next ~5 bars)
+  //
+  // Rationale for not firing per-pulse: Web MIDI input delivers jittery
+  // timestamps (the spec does not guarantee an upper delivery latency;
+  // see https://github.com/WebAudio/web-midi-api/issues/187). Every known
+  // software clock slave (Ableton, Renoise, Max) filters this with a PLL.
+  // The filtered syncBpm + softly-corrected free-running scheduler is
+  // the same pattern in its simplest form.
+
+  return { play, stop, dispose, nudge, isRunning: () => running }
 }

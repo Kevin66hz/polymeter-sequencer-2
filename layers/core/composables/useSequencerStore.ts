@@ -147,6 +147,44 @@ export function useSequencerStore() {
   // Beat-repeat mirrors (scheduler reads these each tick; no dep tracking).
   const repeatOnRaw = { current: false }
   const repeatStepsRaw = { current: 1 }  // loop length in 16th-note steps
+
+  // External-clock sync snapshot (scheduler reads this each tick for PLL
+  // phase correction). Mirrored from midiIn.state via a single watchEffect
+  // below — reads there are cheap and the fields update at ~48Hz on F8.
+  const clockSyncRaw = {
+    current: {
+      syncMode: 'internal' as 'internal' | 'external',
+      pulseCount: 0,
+      lastPulsePerfTime: 0,
+      startPerfTime: 0,
+    },
+  }
+
+  // ── Manual NUDGE offset (external sync fine-adjustment) ─────────────
+  // MIDI-output + Digitakt's internal latency can't be fully closed by
+  // the phase corrector alone — there's a residual system offset the user
+  // needs to dial by ear. Persisted in localStorage so their tuned value
+  // survives reload and next-session. Additive: each button click updates
+  // the stored total AND live-shifts all tracks' nextTime via scheduler.nudge().
+  const NUDGE_STORAGE_KEY = 'polySeq/nudgeOffsetMs'
+  const loadStoredNudge = (): number => {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return 0
+    try {
+      const raw = localStorage.getItem(NUDGE_STORAGE_KEY)
+      if (raw == null) return 0
+      const v = Number(raw)
+      return Number.isFinite(v) ? v : 0
+    } catch { return 0 }
+  }
+  const nudgeOffsetMs = ref(loadStoredNudge())
+  // Raw mirror passed to scheduler. The scheduler reads this once per
+  // play() cycle when it anchors nextTime on the first running tick.
+  const startupNudgeMsRaw = { current: nudgeOffsetMs.value }
+  watch(nudgeOffsetMs, (v) => {
+    startupNudgeMsRaw.current = v
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return
+    try { localStorage.setItem(NUDGE_STORAGE_KEY, String(v)) } catch {}
+  })
   const computeRepeatSteps = (rate: number) => Math.max(1, Math.round(16 / rate))
   repeatStepsRaw.current = computeRepeatSteps(repeatRate.value)
 
@@ -496,6 +534,13 @@ export function useSequencerStore() {
     },
     // onNoteOff is available but not wired; beat-repeat is scheduler-
     // driven and doesn't care about pad release.
+    //
+    // No onStepPulse callback: external sync is done entirely through
+    // the rolling syncBpm average reflected into bpmRaw below. Per-
+    // pulse firing is a known anti-pattern for software slaves — input
+    // timestamp jitter would propagate straight to MIDI output. See
+    // create-scheduler.ts ("External-clock sync, recap") for the full
+    // rationale.
   })
 
   // External clock → BPM sync.
@@ -538,6 +583,31 @@ export function useSequencerStore() {
   watch(masterTarget, v => { masterTargetRef.current = v })
   watch(repeatOn, v => { repeatOnRaw.current = v })
   watch(repeatRate, v => { repeatStepsRaw.current = computeRepeatSteps(v) })
+
+  // ── External-clock sync mirror ──────────────────────────────────────
+  // Mirror the four MIDI IN clock fields into clockSyncRaw so the
+  // scheduler can read them without triggering Vue reactivity. The
+  // multi-source `watch([g1, g2, ...], cb)` form wires up one subscriber
+  // per getter — Vue refires the callback only when at least one source
+  // actually changes (same-value writes are short-circuited by the
+  // reactive Proxy setter), so in internal mode this is silent and in
+  // external mode we pay four property writes per F8 pulse (~48Hz). We
+  // mutate clockSyncRaw.current in place to avoid per-pulse allocations.
+  watch(
+    [
+      () => midiIn.state.syncMode,
+      () => midiIn.state.pulseCountSinceStart,
+      () => midiIn.state.lastPulsePerfTime,
+      () => midiIn.state.startPerfTime,
+    ],
+    ([m, p, lp, sp]) => {
+      clockSyncRaw.current.syncMode = m
+      clockSyncRaw.current.pulseCount = p
+      clockSyncRaw.current.lastPulsePerfTime = lp
+      clockSyncRaw.current.startPerfTime = sp
+    },
+    { immediate: true },
+  )
 
   // Effective pad-view MODE including the special 'rec' case. Recording
   // mode turns the pads into a playhead visualiser: each pad pulses
@@ -640,6 +710,8 @@ export function useSequencerStore() {
       applyFnRef, midiFireRef, audioEnabledRef, masterTargetRef,
       repeatOnRef: repeatOnRaw,
       repeatStepsRef: repeatStepsRaw,
+      clockSyncRaw,
+      startupNudgeMsRef: startupNudgeMsRaw,
       onHeadsTick: h => { heads.value = h },
       onMasterReset: () => handleMasterReset(),
     })
@@ -651,12 +723,50 @@ export function useSequencerStore() {
     // Cancel any pending per-track knob-debounce commits so a late
     // setTimeout can't write to store refs after the view is gone.
     clearAllTrackCommitTimers()
+    // Cancel the NUDGE press-and-hold repeater in case the pointerup
+    // event wasn't delivered before teardown (mid-drag teardown, browser
+    // tab swap with finger still down, etc.).
+    stopNudgeHold()
     // LED timer cancellation and clearFeedback() are handled by
     // useLaunchControlFeedback's own onBeforeUnmount hook.
   })
 
   // ── Transport ───────────────────────────────────────────────────────
   function play() { if (playing.value) return; playing.value = true; scheduler?.play() }
+
+  // Manual NUDGE. Additive — stores the cumulative total for persistence
+  // and live-shifts all tracks' nextTime by the delta if currently playing.
+  // The watcher on nudgeOffsetMs handles the localStorage write.
+  function nudge(deltaMs: number) {
+    if (!Number.isFinite(deltaMs) || deltaMs === 0) return
+    nudgeOffsetMs.value += deltaMs
+    scheduler?.nudge(deltaMs)
+  }
+
+  // Press-and-hold auto-repeat for the NUDGE buttons. First press fires
+  // immediately, then after NUDGE_HOLD_DELAY_MS the timer engages and
+  // ticks every NUDGE_REPEAT_MS — deliberately slow so the user can ear-
+  // tune with finger-on-button feedback. stopNudgeHold is idempotent and
+  // safe to call from pointerup / pointerleave / pointercancel.
+  let nudgeHoldDelayTimer: ReturnType<typeof setTimeout> | null = null
+  let nudgeRepeatTimer: ReturnType<typeof setInterval> | null = null
+  const NUDGE_HOLD_DELAY_MS = 400
+  const NUDGE_REPEAT_MS = 200
+  function stopNudgeHold() {
+    if (nudgeHoldDelayTimer) { clearTimeout(nudgeHoldDelayTimer); nudgeHoldDelayTimer = null }
+    if (nudgeRepeatTimer) { clearInterval(nudgeRepeatTimer); nudgeRepeatTimer = null }
+  }
+  function startNudgeHold(deltaMs: number) {
+    // Cancel any in-flight repeat from a prior press the browser didn't
+    // report pointerup for (touch + modifier edge cases).
+    stopNudgeHold()
+    if (!Number.isFinite(deltaMs) || deltaMs === 0) return
+    nudge(deltaMs)
+    nudgeHoldDelayTimer = setTimeout(() => {
+      nudgeHoldDelayTimer = null
+      nudgeRepeatTimer = setInterval(() => { nudge(deltaMs) }, NUDGE_REPEAT_MS)
+    }, NUDGE_HOLD_DELAY_MS)
+  }
   function stop() {
     playing.value = false
     scheduler?.stop()
@@ -1032,6 +1142,9 @@ export function useSequencerStore() {
 
     // transport
     play, stop,
+
+    // manual NUDGE (external-sync fine-adjustment, persisted)
+    nudge, nudgeOffsetMs, startNudgeHold, stopNudgeHold,
 
     // snapshot
     saveSnapshot, recallSnapshot, clearSnapshot,
