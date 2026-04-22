@@ -110,6 +110,16 @@ interface Track {
 
 さらに MIDI All Notes Off（パニック）＋ 画面フラッシュ 1フレームで「reset が起きた」ことを体感的に示す。
 
+### 調整中オーバーレイ
+
+`masterTarget` が立っている間（= ブリッジ小節が走っている間）は、画面中央に
+「調整中 / ADJUSTING — BRIDGE BARS — TARGET n/d」のオーバーレイが出る。
+`pointer-events-none` で操作は遮らず、`position: fixed` + `z-[50]` で全ビューに
+オーバーレイ（GRID / RING どちらでも）。トップバーの下ボーダーも
+`masterTarget` 有無で `#1a1a1a → #ff660044` に切り替わり、どの画面からでも
+ブリッジ中だと視認できる。ブリッジ中のリズムは意図的に不安定で「面白さの核心」
+なので、通常再生と混同されないことが重要。
+
 ## 6. MeterKnob (`components/MeterKnob.vue`)
 
 回転ツマミ。離散値配列 `options` から1つ選ぶ。

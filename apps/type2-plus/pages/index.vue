@@ -12,6 +12,14 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 //   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
 //   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
 
+// Build-time badge constants. See apps/type2/pages/index.vue for the
+// full rationale — both apps wire the same Vite `define` keys, only
+// __APP_VARIANT__ differs between them.
+const appVariant = __APP_VARIANT__
+const gitBranch = __GIT_BRANCH__
+const gitSha = __GIT_SHA__
+const gitDirty = __GIT_DIRTY__
+
 // ── Store: single reactive brain (state + scheduler lifecycle) ──────
 // Destructuring is safe here: top-level <script setup> bindings preserve
 // ref reactivity and enable template auto-unwrap.
@@ -23,6 +31,7 @@ const {
   midi, midiIn,
   hasMidiPresetForDevice, applyMidiPresetForDevice,
   play, stop,
+  nudgeOffsetMs, startNudgeHold, stopNudgeHold,
   saveSnapshot, recallSnapshot,
   setTrackNum, setTrackDen, toggleTrackMode,
   onMasterKnobChange, commitMaster,
@@ -283,6 +292,12 @@ function onKitFileLoaded(e: Event) {
         <div class="flex flex-col items-start mr-2 flex-shrink-0">
           <img src="/ibk.svg" alt="IBK" class="h-[14px] w-auto block opacity-40 pointer-events-none select-none" />
           <span class="text-[7px] tracking-[1px] text-[#333] leading-none mt-[3px]">POLY SEQ</span>
+          <!-- Build badge. See apps/type2/pages/index.vue for the
+               full rationale — same four Vite-defined constants. -->
+          <span
+            class="text-[6px] tracking-[0.5px] text-[#2a2a2a] leading-none mt-[2px] font-mono select-none"
+            :title="`${appVariant} · ${gitBranch}@${gitSha}${gitDirty ? ' (dirty)' : ''}`"
+          >{{ appVariant }} · {{ gitSha }}{{ gitDirty ? '*' : '' }}</span>
         </div>
         <span class="text-[9px] tracking-[2px] text-[#444] mr-1">MASTER</span>
         <div class="relative z-[6]">
@@ -459,8 +474,37 @@ function onKitFileLoaded(e: Event) {
                 :class="midiIn.state.syncMode==='internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
                 @click="midiIn.state.syncMode='internal'">INT</button>
               <button class="text-[9px] px-1.5 py-1"
-                :class="midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
+                :class="[
+                  midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555] hover:text-[#aaa]',
+                  midiIn.state.syncMode==='external' && midiIn.state.clockAlive ? 'animate-pulse' : '',
+                ]"
                 @click="midiIn.state.syncMode='external'">SYNC</button>
+            </div>
+
+            <!-- NUDGE ± — manual phase offset for external-sync fine-tune.
+                 Persists to localStorage via the store. Press+hold for
+                 slow auto-repeat (400ms delay, 200ms interval); shift
+                 multiplies the step to ±5ms. Only visible in external
+                 sync mode. -->
+            <div v-if="midiIn.state.selectedId && midiIn.state.syncMode==='external'"
+              class="flex items-center gap-0.5 rounded-sm overflow-hidden border border-[#222] flex-shrink-0 select-none">
+              <button class="text-[9px] px-1.5 py-1 bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a]"
+                title="Nudge earlier — press & hold to repeat (−1ms · shift: −5ms)"
+                @pointerdown.exact="startNudgeHold(-1)"
+                @pointerdown.shift.exact="startNudgeHold(-5)"
+                @pointerup="stopNudgeHold"
+                @pointerleave="stopNudgeHold"
+                @pointercancel="stopNudgeHold">−</button>
+              <span class="text-[9px] px-1 py-1 text-[#8fccaa] tabular-nums min-w-[3.4em] text-center"
+                :title="`NUDGE offset ${nudgeOffsetMs}ms — applied on next play; persisted.`"
+              >{{ nudgeOffsetMs > 0 ? '+' : '' }}{{ nudgeOffsetMs }}ms</span>
+              <button class="text-[9px] px-1.5 py-1 bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a]"
+                title="Nudge later — press & hold to repeat (+1ms · shift: +5ms)"
+                @pointerdown.exact="startNudgeHold(1)"
+                @pointerdown.shift.exact="startNudgeHold(5)"
+                @pointerup="stopNudgeHold"
+                @pointerleave="stopNudgeHold"
+                @pointercancel="stopNudgeHold">+</button>
             </div>
 
             <!-- BPM ボタン + オーバーレイ. When SYNC is engaged, the value

@@ -106,6 +106,7 @@ export const MAPPABLE_CONTROLS = [
     { id: `track${i}_solo`,  label: `Track ${i + 1} Solo`,  group: `track${i}` },
     { id: `track${i}_clear`, label: `Track ${i + 1} Clear`, group: `track${i}` },
     { id: `track${i}_rec`,   label: `Track ${i + 1} Step Rec`, group: `track${i}` },
+    { id: `track${i}_shift`, label: `Track ${i + 1} Shift (REC mode)`, group: `track${i}` },
   ])).flat(),
 
   // ── Fader column placeholders ──────────────────────
@@ -167,6 +168,22 @@ export interface MidiInState {
   clockSourceId: string | null
   syncMode: 'internal' | 'external'
   syncBpm: number | null   // last BPM derived from clock
+  // True while F8 pulses are arriving (updated at ~500ms granularity — we
+  // don't write on every pulse to keep reactivity cheap). UI uses this to
+  // blink the SYNC indicator; scheduler does NOT use it (the phase corrector
+  // relies on `pulseCountSinceStart` / `lastPulsePerfTime` instead).
+  clockAlive: boolean
+  // Monotonically-increasing count of F8 pulses received since the last 0xFA
+  // (Start). Reset to 0 on Start; NOT reset on Continue (by design — Continue
+  // preserves song position, so the scheduler's phase reference is still valid).
+  pulseCountSinceStart: number
+  // performance.now()-domain timestamp of the most recent F8 pulse. Paired
+  // with `pulseCountSinceStart` this lets the scheduler compute the master's
+  // actual vs predicted phase.
+  lastPulsePerfTime: number
+  // performance.now()-domain timestamp of the most recent 0xFA (Start) message.
+  // Used as the anchor for expected-phase calculation.
+  startPerfTime: number
   mappings: MidiMapping[]
   learnMode: boolean
   learnControlId: string | null
@@ -197,6 +214,10 @@ export function useMidiIn(callbacks: {
     clockSourceId: null,
     syncMode: 'internal',
     syncBpm: null,
+    clockAlive: false,
+    pulseCountSinceStart: 0,
+    lastPulsePerfTime: 0,
+    startPerfTime: 0,
     mappings: [],
     learnMode: false,
     learnControlId: null,
@@ -236,6 +257,27 @@ export function useMidiIn(callbacks: {
     clockRingCount = 0
     clockRingSum = 0
     lastClockTimestamp = 0
+  }
+
+  // ── clockAlive timeout ─────────────────────────────
+  // `state.clockAlive` drives the UI SYNC-indicator blink. We set it true
+  // on any F8 pulse and re-arm a 500ms timeout; if no pulse arrives within
+  // that window the timeout flips it back to false. Re-arm is cheap even
+  // at 48Hz (clearTimeout + setTimeout); the reactive write is guarded
+  // with a !==-check so we only invalidate Vue's dep graph on state flips.
+  let clockAliveTimerId: ReturnType<typeof setTimeout> | null = null
+  const CLOCK_ALIVE_TIMEOUT_MS = 500
+  const markClockAlive = () => {
+    if (!state.clockAlive) state.clockAlive = true
+    if (clockAliveTimerId) clearTimeout(clockAliveTimerId)
+    clockAliveTimerId = setTimeout(() => {
+      state.clockAlive = false
+      clockAliveTimerId = null
+    }, CLOCK_ALIVE_TIMEOUT_MS)
+  }
+  const killClockAlive = () => {
+    if (clockAliveTimerId) { clearTimeout(clockAliveTimerId); clockAliveTimerId = null }
+    if (state.clockAlive) state.clockAlive = false
   }
 
   // ── Mapping index ─────────────────────────────────
@@ -398,9 +440,9 @@ export function useMidiIn(callbacks: {
       if (sourceId === state.clockSourceId) handleClock(e.timeStamp)
       return
     }
-    if (status === 0xfa) { handleTransport('start'); return }   // Start
-    if (status === 0xfb) { handleTransport('continue'); return } // Continue
-    if (status === 0xfc) { handleTransport('stop'); return }    // Stop
+    if (status === 0xfa) { handleTransport('start', e.timeStamp); return }   // Start
+    if (status === 0xfb) { handleTransport('continue', e.timeStamp); return } // Continue
+    if (status === 0xfc) { handleTransport('stop', e.timeStamp); return }    // Stop
 
     // ── Control Change ────────────────────────────
     if (msgType === 0xb0) {
@@ -442,6 +484,14 @@ export function useMidiIn(callbacks: {
 
   // ── Clock ─────────────────────────────────────────
   const handleClock = (timestamp: number) => {
+    // Phase-corrector inputs (updated unconditionally so the scheduler
+    // can consume them whenever it wants — the reactive writes below are
+    // cheap: Vue's Proxy setter short-circuits same-value writes, and
+    // the numbers change every pulse anyway so there's no redundancy).
+    state.pulseCountSinceStart++
+    state.lastPulsePerfTime = timestamp
+    markClockAlive()
+
     if (lastClockTimestamp > 0) {
       const intervalSec = (timestamp - lastClockTimestamp) / 1000
       // Sanity: ignore intervals outside reasonable BPM range (20–400)
@@ -470,12 +520,34 @@ export function useMidiIn(callbacks: {
   }
 
   // ── Transport ─────────────────────────────────────
-  const handleTransport = (kind: 'start' | 'stop' | 'continue') => {
+  const handleTransport = (kind: 'start' | 'stop' | 'continue', timestamp: number) => {
     // Any selected input can trigger transport; the mapping table is
     // shared so the semantics are the same regardless of origin.
-    if (kind === 'start' || kind === 'continue') {
+    if (kind === 'start') {
+      // Start implies a new transport session — stale intervals from
+      // before a long pause would bias the initial BPM estimate, so
+      // clear the ring. The first handleClock after this skips the
+      // interval math (lastClockTimestamp === 0 guard) and just
+      // re-seeds lastClockTimestamp, so the ring fills cleanly from
+      // the master's first pulse.
+      resetClockTracking()
+      // Phase-corrector anchors: record the Start timestamp and zero
+      // the pulse counter. The scheduler will use these + the latest
+      // F8 timestamp to compute startup phase error after ~2 bars.
+      state.startPerfTime = timestamp
+      state.pulseCountSinceStart = 0
+      callbacks.onPlay()
+    } else if (kind === 'continue') {
+      // Continue preserves song-position phase. BPM ring is left alone
+      // since tempo presumably hasn't changed — the accumulated
+      // average stays valid and we skip a full re-fill window. Phase
+      // corrector is also left alone: without a fresh Start anchor
+      // we can't compute expected-phase reliably, so just let the
+      // existing pulseCount/startPerfTime continue accumulating.
       callbacks.onPlay()
     } else {
+      killClockAlive()
+      state.pulseCountSinceStart = 0
       callbacks.onStop()
     }
   }

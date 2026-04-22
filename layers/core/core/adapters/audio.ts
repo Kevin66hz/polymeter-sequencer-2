@@ -2,9 +2,12 @@
 // be swapped out (e.g. for a sampled engine) without touching the scheduler.
 //
 // The `triggerSound` function is intentionally stateless — one call per step
-// hit. The scheduler invokes it with a single AudioContext instance and the
-// track id. Audio output is muted at the *call* site when audioEnabledRef is
-// false; MIDI fires independently.
+// hit. The scheduler invokes it with a single AudioContext instance, the
+// track id, and the absolute AudioContext time at which the note should
+// sound. All Web Audio start/ramp calls are anchored to that `time` so the
+// sound is rendered on the audio thread's own clock, independent of main-
+// thread jitter (GC pauses, Vue re-renders). Audio output is muted at the
+// *call* site when audioEnabledRef is false; MIDI fires independently.
 //
 // Node lifecycle: every call creates fresh Web Audio nodes routed through a
 // master GainNode → ctx.destination. SourceNodes (Oscillator, BufferSource)
@@ -16,11 +19,21 @@
 // finishes, allowing the full subgraph to be GC'd.
 
 export interface AudioAdapter {
-  trigger(ctx: AudioContext, trackId: number): void
+  /**
+   * Trigger the sound for `trackId` at absolute AudioContext `time`
+   * (seconds). Callers should pass the scheduler's pre-computed time
+   * for the step; adapters must NOT substitute `ctx.currentTime` as
+   * that would re-introduce main-thread scheduling jitter.
+   */
+  trigger(ctx: AudioContext, trackId: number, time: number): void
 }
 
-export function triggerSound(ctx: AudioContext, id: number) {
-  const t = ctx.currentTime + 0.002
+export function triggerSound(ctx: AudioContext, id: number, time?: number) {
+  // Back-compat: older callers invoked triggerSound(ctx, id) without an
+  // explicit time. Fall back to `ctx.currentTime + 0.002` (the prior
+  // default) so existing tests / tools keep working; the scheduler
+  // always passes an explicit time now.
+  const t = typeof time === 'number' ? time : ctx.currentTime + 0.002
   const master = ctx.createGain()
   master.connect(ctx.destination)
 
@@ -95,5 +108,5 @@ export function triggerSound(ctx: AudioContext, id: number) {
 }
 
 export const defaultAudioAdapter: AudioAdapter = {
-  trigger(ctx, id) { triggerSound(ctx, id) },
+  trigger(ctx, id, time) { triggerSound(ctx, id, time) },
 }

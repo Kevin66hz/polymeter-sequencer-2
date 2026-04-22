@@ -12,6 +12,15 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 //   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
 //   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
 
+// Build-time badge constants. Injected via Vite `define` in
+// nuxt.config.ts — see layers/core/types/globals.d.ts for the ambient
+// type declarations. Captured into locals here so the template can
+// reference them as normal bindings.
+const appVariant = __APP_VARIANT__
+const gitBranch = __GIT_BRANCH__
+const gitSha = __GIT_SHA__
+const gitDirty = __GIT_DIRTY__
+
 // ── Store: single reactive brain (state + scheduler lifecycle) ──────
 // Destructuring is safe here: top-level <script setup> bindings preserve
 // ref reactivity and enable template auto-unwrap.
@@ -23,10 +32,15 @@ const {
   midi, midiIn, midiModifiers,
   hasMidiPresetForDevice, applyMidiPresetForDevice,
   play, stop,
+  nudgeOffsetMs, startNudgeHold, stopNudgeHold,
   saveSnapshot, recallSnapshot,
   setTrackNum, setTrackDen, toggleTrackMode,
   onMasterKnobChange, commitMaster,
   toggleStep: tog, doMute, doSolo, doClr,
+  // Per-track pattern shift (REC-mode): < and > buttons next to the
+  // step-record pad rotate the track's pattern. Press-and-hold = repeat.
+  // Also dispatched from a mapped `trackN_shift` CC knob when REC is on.
+  startShiftHold, stopShiftHold,
   // In-app step recording: each track row gets a small pad that appears
   // only when REC is armed (cowork-prompt.md Task B). Reuses the same
   // underlying toggle as the MIDI-IN note-record path so there's one
@@ -289,10 +303,18 @@ function onKitFileLoaded(e: Event) {
         <div class="flex flex-col items-start mr-2 flex-shrink-0">
           <img src="/ibk.svg" alt="IBK" class="h-[14px] w-auto block opacity-40 pointer-events-none select-none" />
           <span class="text-[7px] tracking-[1px] text-[#333] leading-none mt-[3px]">POLY SEQ</span>
+          <!-- Build badge: app variant + short git sha. Lets the user
+               tell at a glance which branch is running. Dirty repo
+               gets a trailing asterisk. Title hover shows the branch
+               name in full. -->
+          <span
+            class="text-[6px] tracking-[0.5px] text-[#2a2a2a] leading-none mt-[2px] font-mono select-none"
+            :title="`${appVariant} · ${gitBranch}@${gitSha}${gitDirty ? ' (dirty)' : ''}`"
+          >{{ appVariant }} · {{ gitSha }}{{ gitDirty ? '*' : '' }}</span>
         </div>
         <span class="text-[9px] tracking-[2px] text-[#444] mr-1">MASTER</span>
         <div class="relative z-[6]">
-          <MeterKnob v-model="masterNum" :options="NUM_OPTS" label="N" :size="54" color="#e5e5e5" @change="onMasterKnobChange" />
+          <MeterKnob v-model="masterNum" :options="NUM_OPTS" label="N" :size="48" color="#e5e5e5" @change="onMasterKnobChange" />
           <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
             :class="isLearning('masterN') ? 'bg-orange-500/70 animate-pulse' : hasBound('masterN') ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
             @click="toggleLearn('masterN')" @click.right.prevent="midiIn.removeMapping('masterN')">
@@ -301,7 +323,7 @@ function onKitFileLoaded(e: Event) {
         </div>
         <span class="text-[22px] text-[#222] leading-none select-none">/</span>
         <div class="relative z-[6]">
-          <MeterKnob v-model="masterDen" :options="DEN_OPTS" label="D" :size="54" color="#e5e5e5" @change="onMasterKnobChange" />
+          <MeterKnob v-model="masterDen" :options="DEN_OPTS" label="D" :size="48" color="#e5e5e5" @change="onMasterKnobChange" />
           <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-full"
             :class="isLearning('masterD') ? 'bg-orange-500/70 animate-pulse' : hasBound('masterD') ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
             @click="toggleLearn('masterD')" @click.right.prevent="midiIn.removeMapping('masterD')">
@@ -410,7 +432,7 @@ function onKitFileLoaded(e: Event) {
             :style="{ visibility: (masterMode==='transition' || masterTarget || stagedKit) ? 'visible' : 'hidden' }">
             <div class="relative z-[6]">
               <button
-                class="py-[5px] px-2 text-[10px] border rounded-sm tracking-[1px] flex items-center gap-1 min-w-[76px] justify-center"
+                class="py-[4px] px-1.5 text-[10px] border rounded-sm tracking-[1px] flex items-center gap-[3px] justify-center leading-none"
                 :class="
                   masterTarget
                     ? 'bg-[#2a1a0a] text-[#ff9944] border-[#ff660066] cursor-not-allowed'
@@ -426,12 +448,9 @@ function onKitFileLoaded(e: Event) {
                     ? `Apply staged kit: ${stagedKit.name}${masterMode === 'transition' ? ' (transition)' : ''}`
                     : 'Commit master N/D'"
                 @click="onApplyClick">
-                <template v-if="masterTarget">⟳ {{ masterTarget }}</template>
+                <template v-if="masterTarget">⟳{{ masterTarget }}</template>
                 <template v-else-if="stagedKit">
-                  <span>{{ masterMode === 'transition' ? '∿' : '⏎' }} APPLY</span>
-                  <span class="text-[#aaa] text-[9px]">
-                    {{ stagedKit.name.length > 4 ? stagedKit.name.slice(0, 4) + '…' : stagedKit.name }}
-                  </span>
+                  <span>{{ masterMode === 'transition' ? '∿' : '⏎' }}APPLY</span>
                 </template>
                 <template v-else>APPLY</template>
               </button>
@@ -500,8 +519,37 @@ function onKitFileLoaded(e: Event) {
                 :class="midiIn.state.syncMode==='internal' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
                 @click="midiIn.state.syncMode='internal'">INT</button>
               <button class="text-[9px] px-1.5 py-1"
-                :class="midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555] hover:text-[#aaa]'"
+                :class="[
+                  midiIn.state.syncMode==='external' ? 'bg-[#2a2a2a] text-[#8fccaa]' : 'bg-transparent text-[#555] hover:text-[#aaa]',
+                  midiIn.state.syncMode==='external' && midiIn.state.clockAlive ? 'animate-pulse' : '',
+                ]"
                 @click="midiIn.state.syncMode='external'">SYNC</button>
+            </div>
+
+            <!-- NUDGE ± — manual phase offset for external-sync fine-tune.
+                 Persists to localStorage via the store. Press+hold for
+                 slow auto-repeat (400ms delay, 200ms interval); shift
+                 multiplies the step to ±5ms. Only visible in external
+                 sync mode. -->
+            <div v-if="midiIn.state.selectedId && midiIn.state.syncMode==='external'"
+              class="flex items-center gap-0.5 rounded-sm overflow-hidden border border-[#222] flex-shrink-0 select-none">
+              <button class="text-[9px] px-1.5 py-1 bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a]"
+                title="Nudge earlier — press & hold to repeat (−1ms · shift: −5ms)"
+                @pointerdown.exact="startNudgeHold(-1)"
+                @pointerdown.shift.exact="startNudgeHold(-5)"
+                @pointerup="stopNudgeHold"
+                @pointerleave="stopNudgeHold"
+                @pointercancel="stopNudgeHold">−</button>
+              <span class="text-[9px] px-1 py-1 text-[#8fccaa] tabular-nums min-w-[3.4em] text-center"
+                :title="`NUDGE offset ${nudgeOffsetMs}ms — applied on next play; persisted.`"
+              >{{ nudgeOffsetMs > 0 ? '+' : '' }}{{ nudgeOffsetMs }}ms</span>
+              <button class="text-[9px] px-1.5 py-1 bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a]"
+                title="Nudge later — press & hold to repeat (+1ms · shift: +5ms)"
+                @pointerdown.exact="startNudgeHold(1)"
+                @pointerdown.shift.exact="startNudgeHold(5)"
+                @pointerup="stopNudgeHold"
+                @pointerleave="stopNudgeHold"
+                @pointercancel="stopNudgeHold">+</button>
             </div>
 
             <!-- BPM ボタン + オーバーレイ. When SYNC is engaged, the value
@@ -909,13 +957,16 @@ function onKitFileLoaded(e: Event) {
                 @open-detail="detailId = detailId === trk.id ? null : trk.id" />
             </div>
 
-            <!-- Bottom row: M/S/CLR + REC pad (REC pad only while armed).
+            <!-- Bottom row: M/S/CLR (left) + < / > / REC pad (right, REC-armed only).
                  In MAP mode, the REC-pad slot shows a Learn overlay so
-                 `trackN_rec` can be bound even when REC is disarmed. -->
-            <div class="flex items-center justify-start flex-shrink-0">
+                 `trackN_rec` can be bound even when REC is disarmed.
+                 The < > / ● group is pushed to the right edge via
+                 justify-between so the M/S/✕ block stays column-aligned
+                 across all tracks regardless of REC state. -->
+            <div class="flex items-center justify-between flex-shrink-0 w-full">
               <div class="flex gap-[3px]">
                 <div class="relative">
-                  <button class="py-[2px] px-[6px] text-[9px] border rounded-sm"
+                  <button class="h-[17px] px-[6px] text-[9px] border rounded-sm leading-none"
                     :style="{ background: trk.mute?'#88888833':'transparent', color: trk.mute?'#ddd':'#555', borderColor: trk.mute?'#888':'#2a2a2a' }"
                     @click.stop="doMute(trk.id)">M</button>
                   <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-sm"
@@ -925,7 +976,7 @@ function onKitFileLoaded(e: Event) {
                   </div>
                 </div>
                 <div class="relative">
-                  <button class="py-[2px] px-[6px] text-[9px] border rounded-sm"
+                  <button class="h-[17px] px-[6px] text-[9px] border rounded-sm leading-none"
                     :style="{ background: trk.solo?'#cc990033':'transparent', color: trk.solo?'#ffcc55':'#555', borderColor: trk.solo?'#cc9900':'#2a2a2a' }"
                     @click.stop="doSolo(trk.id)">S</button>
                   <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-sm"
@@ -935,7 +986,7 @@ function onKitFileLoaded(e: Event) {
                   </div>
                 </div>
                 <div class="relative">
-                  <button class="py-[2px] px-[6px] text-[9px] border border-[#2a2a2a] bg-transparent text-[#555] rounded-sm hover:text-[#ccc]"
+                  <button class="h-[17px] px-[6px] text-[9px] border border-[#2a2a2a] bg-transparent text-[#555] rounded-sm hover:text-[#ccc] leading-none"
                     @click.stop="doClr(trk.id)">✕</button>
                   <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-sm"
                     :class="isLearning(`track${trk.id}_clear`) ? 'bg-orange-500/70 animate-pulse' : hasBound(`track${trk.id}_clear`) ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
@@ -943,11 +994,43 @@ function onKitFileLoaded(e: Event) {
                     <span class="text-[7px] text-white leading-none">{{ isLearning(`track${trk.id}_clear`) ? '●' : bindingLabel(`track${trk.id}_clear`) || '✕' }}</span>
                   </div>
                 </div>
+              </div>
+              <!-- Right-aligned REC controls: < > shift + ● REC pad.
+                   Only present when REC is armed OR MAP is on (so `trackN_shift`
+                   / `trackN_rec` remain bindable). -->
+              <div v-if="recording || showMapping" class="flex gap-[3px] items-center">
+                <!-- Pattern-shift slot: < / > buttons. The buttons share one
+                     Learn overlay since they target the same CC control
+                     (a single knob rotates left/right via sign of delta). -->
+                <div class="relative flex items-center gap-[2px] select-none"
+                  :title="recording
+                    ? 'Shift step pattern — press & hold to repeat. MIDI CC (track shift) scrubs while REC is on.'
+                    : 'Learn: bind a MIDI CC knob to rotate this track pattern (REC-mode)'">
+                  <button
+                    class="h-[17px] px-[6px] text-[9px] border rounded-sm leading-none border-[#2a2a2a] bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a] disabled:opacity-40 disabled:cursor-not-allowed"
+                    :disabled="!recording"
+                    @pointerdown.stop="recording && startShiftHold(trk.id, -1)"
+                    @pointerup="stopShiftHold"
+                    @pointerleave="stopShiftHold"
+                    @pointercancel="stopShiftHold">&lt;</button>
+                  <button
+                    class="h-[17px] px-[6px] text-[9px] border rounded-sm leading-none border-[#2a2a2a] bg-transparent text-[#8fccaa] hover:bg-[#2a2a2a] disabled:opacity-40 disabled:cursor-not-allowed"
+                    :disabled="!recording"
+                    @pointerdown.stop="recording && startShiftHold(trk.id, 1)"
+                    @pointerup="stopShiftHold"
+                    @pointerleave="stopShiftHold"
+                    @pointercancel="stopShiftHold">&gt;</button>
+                  <div v-if="showMapping" class="absolute inset-0 cursor-pointer flex items-center justify-center rounded-sm"
+                    :class="isLearning(`track${trk.id}_shift`) ? 'bg-orange-500/70 animate-pulse' : hasBound(`track${trk.id}_shift`) ? 'bg-blue-500/40' : 'bg-white/10 hover:bg-white/20'"
+                    @click.stop="toggleLearn(`track${trk.id}_shift`)" @click.right.prevent="midiIn.removeMapping(`track${trk.id}_shift`)">
+                    <span class="text-[7px] text-white leading-none">{{ isLearning(`track${trk.id}_shift`) ? '●' : bindingLabel(`track${trk.id}_shift`) || '&lt;&gt;' }}</span>
+                  </div>
+                </div>
                 <!-- REC pad slot. The pad itself is only rendered while REC is
                      armed (keeps the row compact), but the Learn overlay must
-                     stay bindable regardless — placed in a fixed-width slot so
-                     the surface exists even when the pad is hidden. -->
-                <div v-if="recording || showMapping" class="relative w-[22px] h-[17px]">
+                     stay bindable regardless — fixed-width slot height-matched
+                     to M/S/✕ (h-[17px]) so the row stays pixel-aligned. -->
+                <div class="relative w-[22px] h-[17px]">
                   <button v-if="recording"
                     class="absolute inset-0 text-[9px] border rounded-sm leading-none"
                     :class="playing
@@ -1195,6 +1278,30 @@ function onKitFileLoaded(e: Event) {
       </div>
     </Transition>
 
+    <!-- ═══ BRIDGE-BAR OVERLAY ═══
+         Shown while a master transition is in flight (`masterTarget` truthy).
+         During these bridge bars, the sequencer is internally negotiating
+         between the current and next master meter — the rhythms are
+         intentionally unpredictable. This overlay makes that state obvious
+         at a glance. `pointer-events-none` so it never blocks clicks. -->
+    <Transition name="adjusting-fade">
+      <div v-if="masterTarget"
+        class="fixed inset-0 flex items-center justify-center pointer-events-none z-[50] select-none">
+        <div class="flex flex-col items-center gap-3 px-8 py-6 rounded-lg backdrop-blur-[1px]"
+          style="background: radial-gradient(circle at center, rgba(42,18,8,0.55) 0%, rgba(10,10,10,0) 70%);">
+          <div class="flex items-baseline gap-3 text-[#ff9944]">
+            <span class="text-[64px] font-bold tracking-[8px] leading-none animate-pulse"
+              style="text-shadow: 0 0 20px rgba(255,102,0,0.4);">調整中</span>
+          </div>
+          <div class="flex items-center gap-2 text-[#ff9944cc] tracking-[4px] text-[11px] leading-none">
+            <span>⟳</span>
+            <span>ADJUSTING — BRIDGE BARS — TARGET {{ masterTarget }}</span>
+            <span>⟳</span>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
   </div>
 </template>
 
@@ -1207,6 +1314,18 @@ function onKitFileLoaded(e: Event) {
 .detail-panel-enter-from,
 .detail-panel-leave-to {
   transform: translateY(100%);
+  opacity: 0;
+}
+
+/* 調整中 overlay — fade in/out as masterTarget gets set/cleared.
+   Bridge bars are short (usually 2 bars), so keep the transition
+   snappy but not abrupt. */
+.adjusting-fade-enter-active,
+.adjusting-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.adjusting-fade-enter-from,
+.adjusting-fade-leave-to {
   opacity: 0;
 }
 
