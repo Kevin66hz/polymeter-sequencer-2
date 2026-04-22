@@ -7,7 +7,7 @@
 //
 // The store is auto-imported via the core layer extended in nuxt.config.ts.
 
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 // Components are auto-imported by Nuxt:
 //   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
 //   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
@@ -80,6 +80,27 @@ const {
   // Transition-aware apply: bridges into per-track target meters.
   masterMode, masterBridgeBars, playing,
 })
+
+// External-clock sync ramp-up indicator. The scheduler applies its initial
+// hard phase snap once the pulse counter hits INITIAL_SNAP_PULSES (= 192,
+// i.e. 2 bars at 24 PPQN × 4 beats). Until that snap, beats aren't fully
+// aligned with the master clock — we surface that window in the UI via a
+// small "Syncing" overlay. Guarded on:
+//   - syncMode === 'external' (only relevant when slaved)
+//   - playing (hide when transport is stopped)
+//   - pulseCountSinceStart ∈ (0, 192)  — 0 means no Start seen yet, and
+//     we stop showing once the hard snap has happened.
+// Note on perf: `pulseCountSinceStart` is written at ~48 Hz, so this
+// computed re-evaluates at that rate under external clock. The returned
+// boolean only flips twice per transport session, so downstream renders
+// only fire at those flips — Vue short-circuits equal computed writes.
+const INITIAL_SNAP_PULSES = 192
+const syncing = computed(() =>
+  midiIn.state.syncMode === 'external'
+  && playing.value
+  && midiIn.state.pulseCountSinceStart > 0
+  && midiIn.state.pulseCountSinceStart < INITIAL_SNAP_PULSES,
+)
 
 // Beat-repeat rate cycle: 1/2 → 1/4 → 1/8 → 1/16 → loop.
 const REPEAT_RATES = [2, 4, 8, 16] as const
@@ -1278,26 +1299,22 @@ function onKitFileLoaded(e: Event) {
       </div>
     </Transition>
 
-    <!-- ═══ BRIDGE-BAR OVERLAY ═══
-         Shown while a master transition is in flight (`masterTarget` truthy).
-         During these bridge bars, the sequencer is internally negotiating
-         between the current and next master meter — the rhythms are
-         intentionally unpredictable. This overlay makes that state obvious
-         at a glance. `pointer-events-none` so it never blocks clicks. -->
+    <!-- ═══ EXTERNAL-CLOCK SYNC OVERLAY ═══
+         Shown while the external-clock phase corrector is still locking on.
+         The scheduler applies its hard phase snap once 192 F8 pulses have
+         arrived since the last 0xFA Start (= 2 bars at 24 PPQN × 4 beats);
+         before that point beats are not yet fully aligned with the master.
+         We show a small "Syncing" hint for that window so the user knows
+         the temporary rhythmic drift is expected.
+         `pointer-events-none` so it never blocks clicks. -->
     <Transition name="adjusting-fade">
-      <div v-if="masterTarget"
-        class="fixed inset-0 flex items-center justify-center pointer-events-none z-[50] select-none">
-        <div class="flex flex-col items-center gap-3 px-8 py-6 rounded-lg backdrop-blur-[1px]"
-          style="background: radial-gradient(circle at center, rgba(42,18,8,0.55) 0%, rgba(10,10,10,0) 70%);">
-          <div class="flex items-baseline gap-3 text-[#ff9944]">
-            <span class="text-[64px] font-bold tracking-[8px] leading-none animate-pulse"
-              style="text-shadow: 0 0 20px rgba(255,102,0,0.4);">調整中</span>
-          </div>
-          <div class="flex items-center gap-2 text-[#ff9944cc] tracking-[4px] text-[11px] leading-none">
-            <span>⟳</span>
-            <span>ADJUSTING — BRIDGE BARS — TARGET {{ masterTarget }}</span>
-            <span>⟳</span>
-          </div>
+      <div v-if="syncing"
+        class="fixed inset-0 flex items-start justify-center pointer-events-none z-[50] select-none"
+        style="padding-top: 120px;">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-md text-[#ff9944]"
+          style="background: rgba(20,10,4,0.55); backdrop-filter: blur(1px);">
+          <span class="text-[11px] tracking-[3px] leading-none animate-pulse"
+            style="text-shadow: 0 0 8px rgba(255,102,0,0.35);">SYNCING</span>
         </div>
       </div>
     </Transition>
@@ -1317,9 +1334,9 @@ function onKitFileLoaded(e: Event) {
   opacity: 0;
 }
 
-/* 調整中 overlay — fade in/out as masterTarget gets set/cleared.
-   Bridge bars are short (usually 2 bars), so keep the transition
-   snappy but not abrupt. */
+/* Syncing overlay — fade in/out as the external-clock ramp-up window
+   opens/closes. The window is short (2 bars, typically ~4s at 110 BPM),
+   so keep the transition snappy but not abrupt. */
 .adjusting-fade-enter-active,
 .adjusting-fade-leave-active {
   transition: opacity 0.25s ease;
