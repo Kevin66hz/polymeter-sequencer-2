@@ -106,6 +106,7 @@ export const MAPPABLE_CONTROLS = [
     { id: `track${i}_solo`,  label: `Track ${i + 1} Solo`,  group: `track${i}` },
     { id: `track${i}_clear`, label: `Track ${i + 1} Clear`, group: `track${i}` },
     { id: `track${i}_rec`,   label: `Track ${i + 1} Step Rec`, group: `track${i}` },
+    { id: `track${i}_shift`, label: `Track ${i + 1} Shift (REC mode)`, group: `track${i}` },
   ])).flat(),
 
   // ── Fader column placeholders ──────────────────────

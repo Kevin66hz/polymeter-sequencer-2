@@ -406,6 +406,20 @@ export function useSequencerStore() {
       {
         const i = parseTrackControl(controlId, '_n')
         if (i !== null) {
+          // REC-mode modal override. The primary goal: when the user is
+          // recording, the existing N knob (e.g. K[1,c] on LC XL MK2,
+          // already factory-bound to track c's N) turns into a step-
+          // shift encoder for that same track — no extra Learn needed.
+          // The N value is NOT written in this path; exiting REC mode
+          // restores the knob's ordinary N-editing behaviour.
+          if (recording.value) {
+            const prev = lastShiftCC_n[i]
+            if (prev < 0) { lastShiftCC_n[i] = rawValue; return }
+            const delta = rawValue - prev
+            lastShiftCC_n[i] = rawValue
+            applyShiftFromCC(i, delta)
+            return
+          }
           if (midiModifiers.state.d) {
             midiModifiers.markConsumed('d')
             setTrackDen(i, rawToD(rawValue))
@@ -427,6 +441,30 @@ export function useSequencerStore() {
       {
         const i = parseTrackControl(controlId, '_gate')
         if (i !== null) { setTrackGate(i, Math.round(10 + (rawValue / 127) * 490)); return }
+      }
+      // ── Per-track pattern SHIFT (REC-mode only) ─────
+      // `trackN_shift` is a continuous CC that rotates the track's step
+      // pattern. Behaviour is REC-gated: when REC is off the message is
+      // silently ignored (matches the spec — shift is a recording-mode
+      // operation, not a live-performance one).
+      //
+      // Relative-by-delta: we remember lastShiftCC[i]; each new raw
+      // value rotates the pattern by (raw − lastShiftCC[i]) cells. The
+      // first event after REC flips on just records the baseline so the
+      // pattern doesn't jump to wherever the knob is sitting. Works for
+      // both absolute pots (smooth scrub) and relative encoders (±1 per
+      // tick — delta === ±1 every message).
+      {
+        const i = parseTrackControl(controlId, '_shift')
+        if (i !== null) {
+          if (!recording.value) return
+          const prev = lastShiftCC_shift[i]
+          if (prev < 0) { lastShiftCC_shift[i] = rawValue; return }
+          const delta = rawValue - prev
+          lastShiftCC_shift[i] = rawValue
+          applyShiftFromCC(i, delta)
+          return
+        }
       }
       // Per-track pad release (rawValue=0 arrives via useMidiIn's note-
       // off forwarding). Always clears the pad-hold flag so the fader-
@@ -549,6 +587,20 @@ export function useSequencerStore() {
   // (syncBpm 変更後 / ウォッチャー実行前に syncMode が切り替わると更新が抜ける)。
   watch(() => midiIn.state.syncBpm, v => {
     if (v !== null) { bpmRaw.current = v; bpm.value = v }
+  })
+
+  // REC toggle → reset per-track shift CC baselines.
+  // Each baseline holds the knob value from the previous shift event;
+  // when REC flips (either direction), drop them so the next turn
+  // re-bootstraps without jumping the pattern to wherever the knob is
+  // currently parked. Both paths (N-rerouted-to-shift and the dedicated
+  // _shift binding) are reset so users can freely grab either knob.
+  watch(recording, () => {
+    for (let i = 0; i < TRACK_COUNT; i++) {
+      lastShiftCC_n[i] = -1
+      lastShiftCC_shift[i] = -1
+      shiftAccum[i] = 0
+    }
   })
 
   // ── Reactive → raw mirror sync ──────────────────────────────────────
@@ -727,6 +779,8 @@ export function useSequencerStore() {
     // event wasn't delivered before teardown (mid-drag teardown, browser
     // tab swap with finger still down, etc.).
     stopNudgeHold()
+    // Same guard for the per-track pattern-shift press-and-hold repeater.
+    stopShiftHold()
     // LED timer cancellation and clearFeedback() are handled by
     // useLaunchControlFeedback's own onBeforeUnmount hook.
   })
@@ -1007,6 +1061,103 @@ export function useSequencerStore() {
     })
   }
 
+  // ── Per-track pattern shift (REC-mode feature) ─────────────────────
+  // Rotates both `steps` (truncated view) and `stepsSource` (canonical
+  // master pattern) by `delta` cells. Each array is rotated modulo its
+  // OWN length so the shift survives meter transitions — stepsSource is
+  // always ≥ steps, and truncating a rotated source would otherwise lose
+  // trailing hits that should wrap around.
+  //
+  // Positive delta shifts RIGHT (step[0] moves to step[1]); negative is
+  // LEFT. This matches the `>` / `<` button metaphor in the UI.
+  function rotate<T>(arr: T[], delta: number): T[] {
+    const n = arr.length
+    if (n === 0) return arr.slice()
+    let d = delta % n
+    if (d < 0) d += n
+    if (d === 0) return arr.slice()
+    return arr.slice(n - d).concat(arr.slice(0, n - d))
+  }
+  function shiftTrackSteps(id: number, delta: number) {
+    if (!Number.isInteger(delta) || delta === 0) return
+    tracks.value = tracks.value.map(t => t.id !== id ? t : {
+      ...t,
+      steps: rotate(t.steps, delta),
+      stepsSource: rotate(t.stepsSource, delta),
+    })
+  }
+
+  // Press-and-hold auto-repeat for the < / > buttons. Same timing curve
+  // as NUDGE (400ms hold → 200ms repeat). Per-button — only one can be
+  // in-flight at a time; starting a new hold cancels any previous.
+  let shiftHoldDelayTimer: ReturnType<typeof setTimeout> | null = null
+  let shiftRepeatTimer: ReturnType<typeof setInterval> | null = null
+  const SHIFT_HOLD_DELAY_MS = 400
+  const SHIFT_REPEAT_MS = 200
+  function stopShiftHold() {
+    if (shiftHoldDelayTimer) { clearTimeout(shiftHoldDelayTimer); shiftHoldDelayTimer = null }
+    if (shiftRepeatTimer) { clearInterval(shiftRepeatTimer); shiftRepeatTimer = null }
+  }
+  function startShiftHold(id: number, delta: number) {
+    stopShiftHold()
+    if (!Number.isInteger(delta) || delta === 0) return
+    shiftTrackSteps(id, delta)
+    shiftHoldDelayTimer = setTimeout(() => {
+      shiftHoldDelayTimer = null
+      shiftRepeatTimer = setInterval(() => { shiftTrackSteps(id, delta) }, SHIFT_REPEAT_MS)
+    }, SHIFT_HOLD_DELAY_MS)
+  }
+
+  // Per-track last seen CC value for the pattern-shift encoders. −1
+  // means "no baseline yet" — the first CC event after REC flips on
+  // records the current knob position without shifting, so the pattern
+  // doesn't jump to whatever raw value the knob happens to be sitting
+  // at. Subsequent events shift by (raw − prev).
+  //
+  // Two separate baselines because the shift can come from either path:
+  //   · `track${i}_n`  — primary: the *existing* N knob is rerouted
+  //                       into shift while REC is on (modal override,
+  //                       matches LC XL MK2 operation where K[1,c] is
+  //                       already N for track c).
+  //   · `track${i}_shift` — optional dedicated binding for users who
+  //                       want a separate encoder; learned explicitly.
+  // Sharing one baseline would cross-contaminate the two paths (moving
+  // one knob would make the other jump on its next event).
+  //
+  // Both are reset to −1 whenever REC toggles, so the next turn
+  // re-baselines cleanly regardless of which knob the user grabs.
+  const lastShiftCC_n:     number[] = Array(TRACK_COUNT).fill(-1)
+  const lastShiftCC_shift: number[] = Array(TRACK_COUNT).fill(-1)
+
+  // Sub-step accumulator for CC-driven shifts. Raw CC deltas are divided
+  // by SHIFT_CC_DIVISOR before integer-shifting the pattern — a full 0→
+  // 127 sweep of an absolute pot only rotates by 127/divisor cells. User
+  // feedback was that the 1:1 mapping felt too twitchy ("半分の進み具合
+  // がいい"). Fractional remainders accumulate here so slow turns still
+  // eventually commit a whole step.
+  //
+  // One accumulator per track, shared across both CC paths — the user is
+  // almost certainly only turning ONE knob at a time for a given track,
+  // and if they do switch mid-move, carrying the fractional remainder
+  // just feels like continuous motion.
+  //
+  // < / > UI buttons bypass this helper — a click is an explicit
+  // "move exactly one step" intent, not an encoder tick to be scaled.
+  const SHIFT_CC_DIVISOR = 2
+  const shiftAccum: number[] = Array(TRACK_COUNT).fill(0)
+  function applyShiftFromCC(i: number, rawDelta: number) {
+    if (rawDelta === 0) return
+    shiftAccum[i] += rawDelta / SHIFT_CC_DIVISOR
+    // Math.trunc rounds toward zero so positive/negative motion each
+    // need to accumulate a full unit before committing — symmetrical
+    // feel whether the knob is going up or down.
+    const whole = Math.trunc(shiftAccum[i])
+    if (whole !== 0) {
+      shiftTrackSteps(i, whole)
+      shiftAccum[i] -= whole
+    }
+  }
+
   // ── Selection / detail panel ────────────────────────────────────────
   function onCircleSelect(id: number) {
     selectedId.value = id
@@ -1157,6 +1308,9 @@ export function useSequencerStore() {
 
     // step / mute / solo / clear
     toggleStep, doMute, doSolo, doClr,
+
+    // pattern shift (REC-mode — per-track < / > buttons + MIDI CC)
+    shiftTrackSteps, startShiftHold, stopShiftHold,
 
     // in-app step recording (per-track pad, REC-mode gated)
     recordStepAtHead,
