@@ -4,6 +4,18 @@ export const TRACK_COUNT = 16
 
 export type Pending = { timeSig: string }
 
+// Per-step override of the default (trk.midiNote / midiVelocity / gateMs).
+// `note` is the only required field — velocity and gate fall through to
+// the track default when undefined so a simple "just change the pitch for
+// this step" edit stays one keystroke. Kept optional on Track (undefined
+// = all steps use the default) so the feature has zero cost for tracks
+// that never touch it.
+export type StepNote = {
+  note: number             // 0..127
+  velocity?: number        // 0..127 — undefined → fall through to trk.midiVelocity
+  gateMs?: number          // undefined → fall through to trk.gateMs
+}
+
 export type Track = {
   id: number
   name: string
@@ -14,6 +26,10 @@ export type Track = {
   steps: boolean[]
   // `stepsSource` is the canonical, never-truncated master pattern
   stepsSource: boolean[]
+  // Per-step MIDI note/velocity/gate override. Parallel array to
+  // `stepsSource` (same length). `null` entry = use track default.
+  // Undefined (missing) = entire track uses defaults (no allocation).
+  stepNotes?: (StepNote | null)[]
   mute: boolean
   solo: boolean
   midiChannel: number      // 1..16

@@ -21,7 +21,7 @@
 // active-step event. Until then, behaviour is identical to the pre-split
 // version.
 
-import { TRACK_COUNT, type Track, type Pending, type SequencerPlugin } from '#core/types'
+import { TRACK_COUNT, type Track, type Pending, type SequencerPlugin, type StepNote } from '#core/types'
 import { stepDur } from '#core/pure/meter'
 import { applyPending } from '#core/pure/pending'
 import { defaultAudioAdapter, type AudioAdapter } from '#core/adapters/audio'
@@ -52,11 +52,16 @@ export type SchedulerDeps = {
   // predicted step boundary and corrects trackState[*].nextTime. In
   // internal mode this is just ignored.
   clockSyncRaw?: { current: ClockSyncSnapshot }
-  // midiFireRef: called with (id, audioTime, perfTime) — audioTime is the
-  // scheduler's AudioContext-clock time for the step (seconds); perfTime
-  // is the same instant translated to the performance.now() clock (ms)
-  // so the MIDI path can hand it straight to MIDIOutput.send().
-  midiFireRef: { current: ((id: number, audioTime: number, perfTime: number) => void) | null }
+  // midiFireRef: called with (id, audioTime, perfTime, stepNote?) —
+  // audioTime is the scheduler's AudioContext-clock time for the step
+  // (seconds); perfTime is the same instant translated to the
+  // performance.now() clock (ms) so the MIDI path can hand it straight
+  // to MIDIOutput.send(). `stepNote` is the per-step override resolved
+  // by the scheduler from `track.stepNotes[si]` — `null`/undefined means
+  // "use the track defaults". Resolving here (not in the consumer)
+  // keeps the MIDI fire function stateless and makes future NoteEvent-
+  // pipeline plugins simpler to wire.
+  midiFireRef: { current: ((id: number, audioTime: number, perfTime: number, stepNote?: StepNote | null) => void) | null }
   audioEnabledRef: { current: boolean }
   masterTargetRef: { current: string | null }
   onHeadsTick: (heads: number[]) => void
@@ -277,9 +282,14 @@ export function createScheduler(deps: SchedulerDeps) {
     // UI RAF loop observe a consistent per-tick snapshot instead of a
     // mid-tick race.
     if (ok) {
+      // Per-step note override. When REP is active, the trigger-step
+      // index `si` is what the user hears — so we read stepNotes[si] and
+      // NOT the real-step index. This keeps the override semantics
+      // consistent with what the playhead visibly highlights.
+      const sn = trk.stepNotes?.[si] ?? null
       if (audioEnabledRef.current && ctx) audio.trigger(ctx, id, time)
       const perfMs = ctxTimeToPerfMs(time)
-      midiFireRef.current?.(id, time, perfMs)
+      midiFireRef.current?.(id, time, perfMs, sn)
     }
 
     const nowCtx = ctx?.currentTime ?? 0

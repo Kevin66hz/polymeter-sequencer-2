@@ -12,11 +12,11 @@
 //     so the hot loop never walks reactive deps.
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { stepCount, parseSig, deriveStepsFromSource } from '#core/pure/meter'
+import { stepCount, parseSig, deriveStepsFromSource, resizeStepNotes } from '#core/pure/meter'
 import { applyPending } from '#core/pure/pending'
 import { generateBridge } from '#core/pure/bridge'
 import { createScheduler } from '#core/scheduler/create-scheduler'
-import { TRACK_COUNT, type Pending, type Track } from '#core/types'
+import { TRACK_COUNT, type Pending, type Track, type StepNote } from '#core/types'
 import { useMidi } from './useMidi'
 import { useLaunchControlFeedback } from './useLaunchControlFeedback'
 import { useMidiIn } from './useMidiIn'
@@ -204,15 +204,24 @@ export function useSequencerStore() {
   //
   // audioTime is retained for future Audio-path plugins (the `onStep`
   // contract from the design philosophy memo); unused today.
-  const midiFireRef: { current: ((id: number, audioTime: number, perfTime: number) => void) | null } = { current: null }
-  midiFireRef.current = (id, _audioTime, perfTime) => {
+  const midiFireRef: {
+    current: ((id: number, audioTime: number, perfTime: number, stepNote?: StepNote | null) => void) | null
+  } = { current: null }
+  midiFireRef.current = (id, _audioTime, perfTime, stepNote) => {
     // Multi-OUT: gate on the array length — send* internally broadcasts to
     // every selected device, so we only need to ensure at least one is up.
     if (!midi.selectedIds.value.length) return
     const trk = tracksRaw.current[id]; if (!trk) return
-    const gate = trk.gateMs ?? 80
-    midi.sendNoteOn(trk.midiChannel, trk.midiNote, trk.midiVelocity ?? 100, perfTime)
-    midi.sendNoteOff(trk.midiChannel, trk.midiNote, perfTime + gate)
+    // Per-step override fall-through. The scheduler resolves
+    // trk.stepNotes[si] into `stepNote` and passes it in; null/undefined
+    // means "use track defaults". velocity / gateMs on StepNote are
+    // optional so a user can override just the note without having to
+    // re-enter the other two.
+    const note     = stepNote?.note     ?? trk.midiNote
+    const velocity = stepNote?.velocity ?? trk.midiVelocity ?? 100
+    const gate     = stepNote?.gateMs   ?? trk.gateMs       ?? 80
+    midi.sendNoteOn(trk.midiChannel, note, velocity, perfTime)
+    midi.sendNoteOff(trk.midiChannel, note, perfTime + gate)
   }
 
   // ── MIDI (in) ───────────────────────────────────────────────────────
@@ -698,7 +707,15 @@ export function useSequencerStore() {
       const base = snap?.[i] ?? t.stepsSource
       const newLen = stepCount(n, d)
       const { steps, stepsSource } = deriveStepsFromSource(base, newLen, n, d)
-      return { ...t, steps, stepsSource }
+      // Keep per-step overrides aligned with the (possibly resized)
+      // stepsSource. If master reset ran autoPreset (base had no hits)
+      // the new positions have no semantic link to the old — drop.
+      const sourceReset = stepsSource.length !== t.stepsSource.length
+        && base.every(b => !b)
+      const stepNotes = sourceReset
+        ? undefined
+        : resizeStepNotes(t.stepNotes, stepsSource.length)
+      return { ...t, steps, stepsSource, stepNotes }
     })
     masterStepsSnapshot = null
     masterTarget.value = null
@@ -862,7 +879,10 @@ export function useSequencerStore() {
         const [n, d] = parseSig(s.timeSig)
         const cnt = stepCount(n, d)
         const steps = Array(cnt).fill(false).map((_, j) => s.steps[j] ?? false)
-        return { ...t, timeSig: s.timeSig, steps, stepsSource: s.stepsSource.slice() }
+        // stepNotes aren't persisted in TrackSnapshot yet (feat/step-
+        // notes experimental scope). On recall we drop any current
+        // overrides so the track returns to the saved baseline.
+        return { ...t, timeSig: s.timeSig, steps, stepsSource: s.stepsSource.slice(), stepNotes: undefined }
       })
       pendQ.value = pendQ.value.map(() => [])
       // A recall is a hard reset to the stored state — any per-track
@@ -875,9 +895,9 @@ export function useSequencerStore() {
           const [n, d] = parseSig(s.timeSig)
           const cnt = stepCount(n, d)
           const steps = Array(cnt).fill(false).map((_, j) => s.steps[j] ?? false)
-          return { ...t, steps, stepsSource: s.stepsSource.slice() }
+          return { ...t, steps, stepsSource: s.stepsSource.slice(), stepNotes: undefined }
         }
-        return { ...t, stepsSource: s.stepsSource.slice() }
+        return { ...t, stepsSource: s.stepsSource.slice(), stepNotes: undefined }
       })
       pendQ.value = tracks.value.map((t, i) => {
         const s = snap[i]; if (!s || t.timeSig === s.timeSig) return []
@@ -1058,7 +1078,67 @@ export function useSequencerStore() {
       ...t,
       steps: Array(t.steps.length).fill(false),
       stepsSource: Array(t.stepsSource.length).fill(false),
+      // Clearing all steps also drops per-step note overrides — an
+      // orphaned override attached to a now-silent step would just be
+      // confusing noise in the UI.
+      stepNotes: undefined,
     })
+  }
+
+  // ── Per-step MIDI note override (feat/step-notes) ───────────────────
+  // `stepNotes` is a parallel array on Track (length = stepsSource.length,
+  // entries are StepNote | null). Absence = entire track uses the
+  // defaults (trk.midiNote / midiVelocity / gateMs). These mutations
+  // lazy-materialize the array on first edit and drop it entirely when
+  // cleared back to all-null, so tracks that never use the feature pay
+  // zero allocation.
+  //
+  // Semantics:
+  //   setStepNote(id, si, { note, velocity?, gateMs? })
+  //       — merge into existing override at `si`, or create one
+  //   setStepNote(id, si, null)  — clear this step's override
+  //   clearAllStepNotes(id)      — drop the entire array
+  //
+  // The scheduler reads `trk.stepNotes[si]` at fire time; keeping the
+  // array in sync with stepsSource length is the caller's job (meter
+  // changes route through applyPending which handles the resize).
+  function setStepNote(
+    id: number,
+    si: number,
+    patch: Partial<StepNote> | null,
+  ) {
+    tracks.value = tracks.value.map(t => {
+      if (t.id !== id) return t
+      const len = t.stepsSource.length
+      if (si < 0 || si >= len) return t
+      const cur = t.stepNotes ?? (Array(len).fill(null) as (StepNote | null)[])
+      const next = cur.slice()
+      if (patch === null) {
+        next[si] = null
+      } else {
+        const prev = next[si]
+        // Merge: new note/velocity/gateMs override partial fields; `note`
+        // is required semantically (falls back to track default when
+        // missing on a fresh override so "just click, no number" still
+        // produces a valid override we can attach velocity to later).
+        next[si] = {
+          note:     patch.note     ?? prev?.note     ?? t.midiNote,
+          velocity: patch.velocity ?? prev?.velocity,
+          gateMs:   patch.gateMs   ?? prev?.gateMs,
+        }
+      }
+      // Collapse to undefined when the array is all-null so the track
+      // returns to its "no allocation" state. Cheaper to let the
+      // scheduler branch on `trk.stepNotes?.[si]` than to keep an empty
+      // array around on every track.
+      const allNull = next.every(v => v === null)
+      return { ...t, stepNotes: allNull ? undefined : next }
+    })
+  }
+
+  function clearAllStepNotes(id: number) {
+    tracks.value = tracks.value.map(t =>
+      t.id === id ? { ...t, stepNotes: undefined } : t)
   }
 
   // ── Per-track pattern shift (REC-mode feature) ─────────────────────
@@ -1084,6 +1164,10 @@ export function useSequencerStore() {
       ...t,
       steps: rotate(t.steps, delta),
       stepsSource: rotate(t.stepsSource, delta),
+      // Rotate per-step overrides alongside the pattern itself — the
+      // user's mental model is "this step has this note", so the note
+      // must follow the step as the pattern rotates.
+      stepNotes: t.stepNotes ? rotate(t.stepNotes, delta) : undefined,
     })
   }
 
@@ -1311,6 +1395,9 @@ export function useSequencerStore() {
 
     // pattern shift (REC-mode — per-track < / > buttons + MIDI CC)
     shiftTrackSteps, startShiftHold, stopShiftHold,
+
+    // per-step MIDI note override (optional — stepNotes may be undefined)
+    setStepNote, clearAllStepNotes,
 
     // in-app step recording (per-track pad, REC-mode gated)
     recordStepAtHead,

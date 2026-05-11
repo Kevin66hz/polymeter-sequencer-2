@@ -1,5 +1,7 @@
 // Pure meter / grid math. Zero side effects.
 
+import type { StepNote } from '#core/types'
+
 // Parse "n/d" into [n, d] with sane fallbacks (both default to 4 if NaN).
 // Shared helper — used by store, pending application, and UI meter helpers.
 export const parseSig = (s: string): [number, number] => {
@@ -84,4 +86,31 @@ export const deriveStepsFromSource = (
     }
   }
   return { steps: out, stepsSource: out.slice() }
+}
+
+// Resize a parallel `stepNotes` array to match a new stepsSource length.
+// The contract matches `deriveStepsFromSource` shape conservatively:
+//   - undefined in → undefined out (track has no per-step overrides at all;
+//     stay that way to keep the "no allocation for unused feature" property)
+//   - shrink → slice (drop trailing overrides that no longer have a step)
+//   - grow  → pad with `null` (new positions inherit the track default;
+//     we intentionally do NOT tile overrides to avoid surprising note
+//     repetition on meter changes)
+//   - same length → identity clone (defensive copy for call-site immutability)
+//
+// Note: when `deriveStepsFromSource` returns a brand-new autoPreset because
+// source had no hits, the caller should drop stepNotes entirely (pass
+// undefined here, or set it to undefined on the resulting track) — every
+// position is a new one with no semantic link to the old pattern.
+export const resizeStepNotes = (
+  source: (StepNote | null)[] | undefined,
+  newLen: number,
+): (StepNote | null)[] | undefined => {
+  if (!source) return undefined
+  const oldLen = source.length
+  if (oldLen === newLen) return source.slice()
+  if (newLen < oldLen) return source.slice(0, newLen)
+  const out: (StepNote | null)[] = Array(newLen).fill(null)
+  for (let i = 0; i < oldLen; i++) out[i] = source[i]
+  return out
 }
