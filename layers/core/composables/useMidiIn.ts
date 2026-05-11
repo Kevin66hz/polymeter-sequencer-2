@@ -1,4 +1,4 @@
-import { reactive, toRaw, watch } from 'vue'
+import { reactive, toRaw, watch, onBeforeUnmount } from 'vue'
 
 // ── MIDI Input: external controller support ────────────────────────
 //
@@ -280,6 +280,70 @@ export function useMidiIn(callbacks: {
     if (state.clockAlive) state.clockAlive = false
   }
 
+  // ── CC coalesce buffer (perf) ────────────────────────
+  // Physical knobs / faders can stream 30–60 CCs per second during a sweep.
+  // Dispatching each one synchronously through `callbacks.onCCMapped` hits
+  // the store's continuous-control handlers (setTrackNum / setTrackDen /
+  // setTrackGate / setStepNote / applyShiftFromCC / …), each of which does
+  // `tracks.value = tracks.value.map(...)`. That rebuilds all 16 tracks and
+  // cascades into every CircularTrack re-render — heavy enough under
+  // external-clock slave (pulse writes at ~48 Hz also on main thread) to
+  // block `tick()` past its 100 ms look-ahead window and produce audible
+  // playback stutter.
+  //
+  // Strategy: within one animation-frame window, last value wins per
+  // controlId. Sweeping a knob only cares about its latest position; a
+  // one-frame (~16 ms) delivery delay is well below human perceptual
+  // latency for continuous motion.
+  //
+  // Scope: CC stream only (see `triggerControl`'s `fromCC` branch).
+  // Note-triggered control presses bypass this buffer so quick pad taps
+  // (press + release within the same frame) are never coalesced away —
+  // they flow through `callbacks.onCCMapped` synchronously like before.
+  //
+  // Caveats documented here so a future refactor doesn't "fix" them by
+  // mistake:
+  //   • Relative encoders that stream a fixed value per tick lose
+  //     per-tick granularity; the store uses `delta = raw − prev`, so
+  //     the flushed value represents net displacement since the last
+  //     flush — correct for absolute pots (the only form the current
+  //     shift / N CC handlers target).
+  //   • A CC-bound press + release occurring in the same frame would
+  //     collapse to the release value. Rare at human speed on physical
+  //     buttons; edge events should prefer note-mapping anyway.
+  const pendingCCs = new Map<string, number>()
+  let ccRafId: number | null = null
+  const flushPendingCCs = () => {
+    ccRafId = null
+    // Snapshot-then-clear so a callback that synchronously triggers
+    // another CC (very rare, but theoretically possible through
+    // re-entrant reactivity) doesn't have its enqueue wiped by the
+    // tail of this drain.
+    const drained: [string, number][] = []
+    pendingCCs.forEach((v, k) => drained.push([k, v]))
+    pendingCCs.clear()
+    for (let i = 0; i < drained.length; i++) {
+      callbacks.onCCMapped(drained[i][0], drained[i][1])
+    }
+  }
+  const enqueueCC = (controlId: string, rawValue: number) => {
+    pendingCCs.set(controlId, rawValue)
+    if (ccRafId == null) {
+      ccRafId = requestAnimationFrame(flushPendingCCs)
+    }
+  }
+
+  // Component teardown: cancel any pending flush so a late rAF doesn't
+  // write into a disposed store. Safe to call onBeforeUnmount from a
+  // composable — Vue attaches it to the nearest setup scope.
+  onBeforeUnmount(() => {
+    if (ccRafId != null) {
+      cancelAnimationFrame(ccRafId)
+      ccRafId = null
+    }
+    pendingCCs.clear()
+  })
+
   // ── Mapping index ─────────────────────────────────
   // O(1) trigger lookup keyed by "type|channel|number". Rebuilt whenever
   // state.mappings changes (rare — Learn, removeMapping, loadMappings).
@@ -474,6 +538,9 @@ export function useMidiIn(callbacks: {
         const modId = mapped.controlId.slice(4) as 'd' | 'm' | 's' | 'r'
         callbacks.onModifierChange?.(modId, false)
       } else if (mapped) {
+        // Note-sourced release edge — stays synchronous (no rAF
+        // coalesce) so a quick pad tap's press and release aren't
+        // collapsed together. See pendingCCs block for rationale.
         callbacks.onCCMapped(mapped.controlId, 0)
       } else {
         callbacks.onNoteOff?.(channel, data1)
@@ -566,7 +633,9 @@ export function useMidiIn(callbacks: {
     const mapping = mappingIndex.get(mappingKey('note', channel, note))
     if (mapping) {
       if (MIDI_IN_DEBUG) console.info(`[midi-in] note-on ch${channel} #${note} vel${velocity} → ${mapping.controlId}`)
-      triggerControl(mapping.controlId, velocity)
+      // fromCC = false: note-mapped taps must stay synchronous so a
+      // press/release inside one rAF window isn't collapsed.
+      triggerControl(mapping.controlId, velocity, false)
       return
     }
     if (MIDI_IN_DEBUG) console.info(`[midi-in] note-on ch${channel} #${note} vel${velocity} → UNMAPPED (falling through to onNoteIn)`)
@@ -583,12 +652,19 @@ export function useMidiIn(callbacks: {
     }
     const mapping = mappingIndex.get(mappingKey('cc', channel, cc))
     if (mapping) {
-      triggerControl(mapping.controlId, value)
+      // fromCC = true: the hot-path case. Continuous knob/fader streams
+      // are coalesced per animation frame to keep the store's
+      // tracks.value rebuilds off the critical scheduler thread.
+      triggerControl(mapping.controlId, value, true)
     }
   }
 
   // ── Control dispatch ─────────────────────────────
-  const triggerControl = (controlId: string, rawValue: number) => {
+  // `fromCC` tags which physical stream sourced this call so we know
+  // whether it's safe to coalesce via pendingCCs (knob/fader sweeps) or
+  // must stay synchronous (note-mapped pad taps, where a press+release
+  // inside one frame would otherwise be lost).
+  const triggerControl = (controlId: string, rawValue: number, fromCC: boolean) => {
     if (controlId === 'transport_play') {
       callbacks.onPlay()
     } else if (controlId === 'transport_stop') {
@@ -600,8 +676,14 @@ export function useMidiIn(callbacks: {
       const modId = controlId.slice(4) as 'd' | 'm' | 's' | 'r'
       if (MIDI_IN_DEBUG) console.info(`[midi-in] modifier ${modId} ${rawValue > 0 ? 'DOWN' : 'UP'} (raw=${rawValue})`)
       callbacks.onModifierChange?.(modId, rawValue > 0)
+    } else if (fromCC) {
+      // CC-sourced continuous controls: coalesce to the latest value
+      // per controlId inside a single animation frame. See pendingCCs
+      // block above for the full rationale.
+      enqueueCC(controlId, rawValue)
     } else {
-      // All other controls: delegate to caller (index.vue) with raw 0-127 value
+      // Note-sourced dispatches (mapped pads): deliver synchronously so
+      // fast press+release taps aren't eaten by same-frame coalescing.
       callbacks.onCCMapped(controlId, rawValue)
     }
   }
