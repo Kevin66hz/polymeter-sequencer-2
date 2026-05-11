@@ -7,7 +7,7 @@
 //
 // The store is auto-imported via the core layer extended in nuxt.config.ts.
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 // Components are auto-imported by Nuxt:
 //   - MeterKnob / StepCell   — layers/core/components/ (shared primitives)
 //   - CircularTrack / ConcentricView / StepSequencer — ./components/ (Type2)
@@ -46,6 +46,11 @@ const {
   // underlying toggle as the MIDI-IN note-record path so there's one
   // code path for "write a step at the playhead".
   recordStepAtHead,
+  // Per-step MIDI note override (Phase 1: UI editor in detail panel).
+  // Absent on most tracks — the store lazily allocates `stepNotes` on
+  // first edit and drops it back to undefined when all overrides are
+  // cleared, so untouched tracks pay zero allocation.
+  setStepNote, clearAllStepNotes,
   onCircleSelect, onBackgroundClick,
   selTrack, detTrk,
   updSel, updDet,
@@ -149,6 +154,48 @@ const midiSaveTracks = ref(true)
 const midiSaveMapping = ref(true)
 const midiLoadTracks = ref(true)
 const midiLoadMapping = ref(true)
+
+// ── Per-step MIDI note override editor (detail panel, Phase 1) ──────
+// When `noteEditMode` is on, clicks in the detail-panel StepSequencer
+// SELECT a step instead of toggling it. `selectedStepIdx` is the
+// currently-selected step (-1 = none). The small editor row below the
+// step bar then drives `setStepNote` for that step. Both pieces of
+// state reset whenever the detail panel closes or switches tracks —
+// selections shouldn't leak across tracks (step indices aren't
+// comparable across different meters).
+const noteEditMode = ref(false)
+const selectedStepIdx = ref<number>(-1)
+function resetStepNoteUi() {
+  noteEditMode.value = false
+  selectedStepIdx.value = -1
+}
+// Detail-panel step click dispatcher: toggle in normal mode, select in
+// edit mode. Keeps the existing one-click-to-toggle UX untouched when
+// the feature is off.
+function onDetailStepSelect(si: number) {
+  selectedStepIdx.value = si
+}
+// Small helper to read the current override (or compute effective values
+// from track defaults). Returns the numbers the input controls should
+// display. Avoids re-deriving this inline inside the template where Vue
+// would re-run it every paint.
+function detStepNoteVals() {
+  const t = detTrk()
+  const si = selectedStepIdx.value
+  if (!t || si < 0) return null
+  const ov = t.stepNotes?.[si] ?? null
+  return {
+    note:     ov?.note     ?? t.midiNote,
+    velocity: ov?.velocity ?? t.midiVelocity,
+    gateMs:   ov?.gateMs   ?? t.gateMs,
+    hasOverride: !!ov,
+  }
+}
+// Reset the per-step-note editor when the detail panel closes or
+// switches to a different track. Step indices aren't comparable across
+// meters (a "5" in 7/8 doesn't mean the same as "5" in 5/4), and the
+// note-edit toggle should never carry over either.
+watch(detailId, () => { resetStepNoteUi() })
 
 // ── Global keybind: Space = play/stop (skip when typing in fields) ──
 function onGlobalKeyDown(e: KeyboardEvent) {
@@ -1250,6 +1297,18 @@ function onKitFileLoaded(e: Event) {
                 : 'Start playback to place steps'"
               :disabled="!playing"
               @click="recordStepAtHead(detailId!)">●</button>
+            <!-- Per-step NOTE edit mode toggle. When ON, step clicks in this
+                 panel SELECT (for editing) instead of TOGGLE. The inline
+                 editor below the step bar then appears. Highlights in amber
+                 to echo the override-dot colour in StepSequencer. -->
+            <button class="py-1 px-2 text-[9px] border rounded-sm leading-none"
+              :title="noteEditMode
+                ? 'Click to exit per-step note edit mode'
+                : 'Per-step note override — click steps to edit MIDI note / vel / gate'"
+              :style="noteEditMode
+                ? { background:'#2a2010', color:'#ffcc55', borderColor:'#ffcc5555' }
+                : { background:'transparent', color:'#555', borderColor:'#2a2a2a' }"
+              @click="() => { noteEditMode = !noteEditMode; if (!noteEditMode) selectedStepIdx = -1 }">N✎</button>
           </div>
 
           <!-- 縦区切り -->
@@ -1283,16 +1342,72 @@ function onKitFileLoaded(e: Event) {
             </div>
           </div>
 
-          <!-- ステップシーケンサー -->
+          <!-- ステップシーケンサー + 任意の per-step note エディタ -->
           <div class="flex-1 min-w-0 flex flex-col justify-center gap-1 pl-2 pr-2">
-            <div class="text-[8px] text-[#444] tracking-[1px] leading-none">STEPS</div>
+            <!-- ラベル行: STEPS + (edit モード時) 選択ステップ情報 -->
+            <div class="flex items-center gap-2 text-[8px] tracking-[1px] leading-none">
+              <span class="text-[#444]">STEPS</span>
+              <template v-if="noteEditMode">
+                <span class="text-[#ffcc55]">· EDIT</span>
+                <span v-if="selectedStepIdx >= 0" class="text-[#888]">
+                  #{{ selectedStepIdx + 1 }}
+                  <span v-if="detStepNoteVals()?.hasOverride" class="text-[#ffcc55]">·OVR</span>
+                </span>
+                <span v-else class="text-[#555]">click a step →</span>
+                <button v-if="(detTrk()!.stepNotes?.some(n => n != null))"
+                  class="ml-auto px-1.5 py-0.5 text-[8px] border border-[#2a2a2a] bg-transparent text-[#555] rounded-sm hover:text-[#ccc]"
+                  title="Clear all per-step note overrides on this track"
+                  @click="clearAllStepNotes(detailId!)">CLR ALL</button>
+              </template>
+            </div>
             <StepSequencer
               :track="detTrk()!"
               :head="heads[detailId!]"
-              :cell-h="60"
+              :cell-h="noteEditMode ? 36 : 60"
               :max-cell-w="40"
+              :edit-mode="noteEditMode"
+              :selected-idx="selectedStepIdx"
               @toggle="(si) => tog(detailId!, si)"
+              @select="onDetailStepSelect"
             />
+            <!-- Per-step note editor (noteEditMode かつ step 選択中のみ表示) -->
+            <div v-if="noteEditMode && selectedStepIdx >= 0 && detStepNoteVals()"
+              class="flex items-center gap-3 text-[9px] pt-1 border-t border-[#1e1e1e]">
+              <!-- NOTE 0-127 -->
+              <div class="flex items-center gap-1">
+                <span class="text-[#555]">NOTE</span>
+                <input type="number" min="0" max="127"
+                  :value="detStepNoteVals()!.note"
+                  class="bg-[#111] text-[#ffcc55] border border-[#2a2a2a] rounded-sm px-1 py-0 w-[40px] tabular-nums text-[9px]"
+                  @input="(e) => setStepNote(detailId!, selectedStepIdx, {
+                    note: Math.max(0, Math.min(127, Number((e.target as HTMLInputElement).value)|0))
+                  })" />
+              </div>
+              <!-- VEL 1-127 -->
+              <div class="flex items-center gap-1">
+                <span class="text-[#555]">VEL</span>
+                <input type="range" min="1" max="127" :value="detStepNoteVals()!.velocity" class="w-[70px]"
+                  @input="(e) => setStepNote(detailId!, selectedStepIdx, {
+                    velocity: Number((e.target as HTMLInputElement).value)
+                  })" />
+                <span class="text-[#888] w-5 tabular-nums">{{ detStepNoteVals()!.velocity }}</span>
+              </div>
+              <!-- GT 10-500ms -->
+              <div class="flex items-center gap-1">
+                <span class="text-[#555]">GT</span>
+                <input type="range" min="10" max="500" step="10" :value="detStepNoteVals()!.gateMs" class="w-[70px]"
+                  @input="(e) => setStepNote(detailId!, selectedStepIdx, {
+                    gateMs: Number((e.target as HTMLInputElement).value)
+                  })" />
+                <span class="text-[#888] w-10 tabular-nums">{{ detStepNoteVals()!.gateMs }}ms</span>
+              </div>
+              <!-- CLEAR (drop this step's override, fall back to track defaults) -->
+              <button class="ml-auto px-1.5 py-0.5 text-[8px] border border-[#2a2a2a] bg-transparent text-[#555] rounded-sm hover:text-[#ccc]"
+                title="Remove override for this step"
+                :disabled="!detStepNoteVals()!.hasOverride"
+                :class="!detStepNoteVals()!.hasOverride ? 'opacity-40 cursor-not-allowed' : ''"
+                @click="setStepNote(detailId!, selectedStepIdx, null)">CLR</button>
+            </div>
           </div>
 
         </div>
