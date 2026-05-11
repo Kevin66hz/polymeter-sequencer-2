@@ -70,11 +70,23 @@ const needleRefs: SVGLineElement[] = []
 let rafId: number | null = null
 let running = false
 
+// Hit-flash state. Each track remembers the integer step index it last
+// landed on (`lastIntStep`) — used to detect step-boundary crossings —
+// plus the position and timestamp of the most recent ACTIVE-step hit
+// (`hitStep`, `hitTime`). The flash element is positioned at that
+// remembered hit step and fades out over FLASH_FADE_MS so the bright
+// "blip" lingers briefly even after the playhead has moved on.
+const FLASH_FADE_MS = 480
+const lastIntStep: number[] = new Array(TRACK_COUNT).fill(-1)
+const hitStep: number[] = new Array(TRACK_COUNT).fill(-1)
+const hitTime: number[] = new Array(TRACK_COUNT).fill(0)
+
 function updateOverlay() {
   if (!running) return
 
   const heads = props.displayHeads.current
   const tracks = props.tracksRaw.current
+  const now = performance.now()
 
   for (let ti = 0; ti < TRACK_COUNT; ti++) {
     const head = heads[ti]
@@ -91,55 +103,68 @@ function updateOverlay() {
     if (head < 0 || stepsLen <= 0) {
       needleEl?.setAttribute('visibility', 'hidden')
       flashEl?.setAttribute('visibility', 'hidden')
+      lastIntStep[ti] = -1
+      hitStep[ti] = -1
       continue
     }
 
     // Defensive: during a time-sig transition, the scheduler's head index
     // and tracksRaw.current[ti].steps.length are not updated atomically.
     // `head` may briefly outlive a shrinking pattern (e.g. head=12 while
-    // steps just dropped to length 8). Wrap via modulo to stay in bounds,
-    // mirroring the implicit trig wrap that Stage 1's dotX/dotY relied on.
-    // Without this, coords.x[head] is undefined → SVG attribute becomes
-    // NaN → needle tip snaps to (0,0), appearing to shoot outside the ring.
+    // steps just dropped to length 8). Wrap via modulo to stay in bounds.
     const safeHead = head >= stepsLen ? head % stepsLen : head
+    const intStep = Math.floor(safeHead)
 
-    // One cache lookup per track per frame. Both needle tip and flash
-    // position share the same (headX, headY).
+    // Detect a step-boundary crossing onto an ACTIVE step → fire flash.
+    // We remember the step index and timestamp; the flash element keeps
+    // showing/fading from that position even as the head moves on.
+    if (intStep !== lastIntStep[ti]) {
+      lastIntStep[ti] = intStep
+      if (trk.steps[intStep] && !trk.mute) {
+        hitStep[ti] = intStep
+        hitTime[ti] = now
+      }
+    }
+
     const coords = getDotCoords(ti, stepsLen)
-    const headX = coords.x[safeHead]
-    const headY = coords.y[safeHead]
+    const headX = coords.x[intStep]
+    const headY = coords.y[intStep]
 
-    // Update needle
+    // Update needle (always tracks current head position).
+    // Phosphor-green colour matches the rest of the radar scope.
     if (needleEl) {
       needleEl.setAttribute('x2', String(headX))
       needleEl.setAttribute('y2', String(headY))
-      needleEl.setAttribute('stroke', trk.color)
-      needleEl.setAttribute('stroke-width', isSelected ? '1.5' : '0.8')
-      needleEl.setAttribute('opacity', isSelected ? '0.9' : '0.5')
+      needleEl.setAttribute('stroke', isSelected ? 'rgba(190, 255, 210, 0.95)' : 'rgba(150, 230, 165, 0.55)')
+      needleEl.setAttribute('stroke-width', isSelected ? '1.4' : '0.8')
+      needleEl.setAttribute('opacity', '1')
       needleEl.setAttribute('visibility', 'visible')
     }
 
-    // Update flash (playhead indicator)
+    // Update flash — sticks at the last hit ACTIVE step, fades out.
+    // Bright phosphor "contact return" appearance.
     if (flashEl) {
-      flashEl.setAttribute('cx', String(headX))
-      flashEl.setAttribute('cy', String(headY))
-
-      if (trk.steps[safeHead]) {
-        // active step at playhead: colored halo
-        flashEl.setAttribute('r', String(dotR(ti) + 3))
-        flashEl.setAttribute('fill', trk.color)
-        flashEl.setAttribute('stroke', 'none')
-        flashEl.setAttribute('opacity', '0.35')
+      const hs = hitStep[ti]
+      if (hs < 0 || hs >= stepsLen) {
+        flashEl.setAttribute('visibility', 'hidden')
       } else {
-        // inactive step at playhead: dim gray dot + colored ring
-        // (restores original ConcentricView behavior)
-        flashEl.setAttribute('r', String(dotR(ti)))
-        flashEl.setAttribute('fill', '#3a3d50')
-        flashEl.setAttribute('stroke', trk.color)
-        flashEl.setAttribute('stroke-width', '1')
-        flashEl.setAttribute('opacity', trk.mute ? '0.25' : '1')
+        const elapsed = now - hitTime[ti]
+        const t = elapsed / FLASH_FADE_MS
+        if (t >= 1) {
+          flashEl.setAttribute('visibility', 'hidden')
+        } else {
+          // Ease-out fade: snap-bright then trail off.
+          const opacity = Math.max(0, 1 - t)
+          flashEl.setAttribute('cx', String(coords.x[hs]))
+          flashEl.setAttribute('cy', String(coords.y[hs]))
+          // Half the previous "+3" halo radius — a tighter, sharper blip.
+          flashEl.setAttribute('r', String((dotR(ti) + 3) * 0.5))
+          flashEl.setAttribute('fill', 'rgba(180, 255, 200, 1)')
+          flashEl.setAttribute('stroke', 'none')
+          flashEl.setAttribute('opacity', String(opacity))
+          flashEl.setAttribute('visibility', 'visible')
+        }
       }
-      flashEl.setAttribute('visibility', 'visible')
     }
   }
 
@@ -158,10 +183,12 @@ function stopLoop() {
     cancelAnimationFrame(rafId)
     rafId = null
   }
-  // Hide all overlays when stopped
+  // Hide all overlays and clear hit state when stopped
   for (let ti = 0; ti < TRACK_COUNT; ti++) {
     flashRefs[ti]?.setAttribute('visibility', 'hidden')
     needleRefs[ti]?.setAttribute('visibility', 'hidden')
+    lastIntStep[ti] = -1
+    hitStep[ti] = -1
   }
 }
 

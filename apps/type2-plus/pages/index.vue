@@ -103,7 +103,7 @@ function onApplyClick() {
 }
 
 // ── UI-local state (not shared across UI variants) ──────────────────
-type ViewMode = 'grid' | 'concentric' | 'star' | 'solar'
+type ViewMode = 'grid' | 'concentric' | 'star' | 'solar' | 'drive'
 const viewMode = ref<ViewMode>('grid')
 const showBpmOverlay = ref(false)
 const midiConfigInput = ref<HTMLInputElement | null>(null)
@@ -605,6 +605,9 @@ function onKitFileLoaded(e: Event) {
             <button class="text-[9px] px-2 py-1"
               :class="viewMode==='solar' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555] hover:text-[#999]'"
               @click="viewMode='solar'">☼ SOLAR</button>
+            <button class="text-[9px] px-2 py-1"
+              :class="viewMode==='drive' ? 'bg-[#2a2a2a] text-[#ddd]' : 'bg-transparent text-[#555] hover:text-[#999]'"
+              @click="viewMode='drive'">🏎 DRIVE</button>
           </div>
 
           <!-- 縦区切り -->
@@ -869,12 +872,19 @@ function onKitFileLoaded(e: Event) {
 
       <!-- ── CONCENTRIC VIEW (Phase 5 Stage 1: using ConcentricViewPlus) ── -->
       <template v-else-if="viewMode==='concentric'">
-        <div class="flex-1 overflow-y-auto flex justify-center items-start p-3" @click="onBackgroundClick">
+        <div class="ring-radar-bg flex-1 min-h-0 relative overflow-hidden" @click="onBackgroundClick">
           <ConcentricViewPlus
             :tracks="tracks" :heads="heads" :selected-id="selectedId"
             :audio-on="audioOn"
             :display-heads="displayHeads"
             :tracks-raw="tracksRaw"
+            :bpm="bpm"
+            :playing="playing"
+            :recording="recording"
+            :repeat-on="repeatOn"
+            :repeat-rate="repeatRate"
+            :pend-q="pendQ"
+            :master-mode="masterMode"
             @select="onCircleSelect($event)"
             @toggle="(ti: number, si: number) => tog(ti, si)" />
         </div>
@@ -985,6 +995,26 @@ function onKitFileLoaded(e: Event) {
               :display-heads="displayHeads"
               :tracks-raw="tracksRaw"
               :selected-id="selectedId"
+            />
+          </ClientOnly>
+        </div>
+      </template>
+
+      <!-- ── DRIVE VIEW (PC-98 lo-fi rhythm-game perspective road) ── -->
+      <template v-else-if="viewMode==='drive'">
+        <div class="flex-1 min-h-0 relative" @click="onBackgroundClick">
+          <ClientOnly>
+            <DriveView
+              :tracks="tracks"
+              :display-heads="displayHeads"
+              :tracks-raw="tracksRaw"
+              :bpm="bpm"
+              :playing="playing"
+              :master-target="masterTarget"
+              :master-num="masterNum"
+              :master-den="masterDen"
+              :repeat-on="repeatOn"
+              :repeat-rate="repeatRate"
             />
           </ClientOnly>
         </div>
@@ -1104,6 +1134,11 @@ function onKitFileLoaded(e: Event) {
 </template>
 
 <style scoped>
+/* RING VIEW: 黒背景のみ。グリッドはSVG内でレーダーセルと一体描画。 */
+.ring-radar-bg {
+  background-color: #000;
+}
+
 /* 詳細パネル スライドアップ */
 .detail-panel-enter-active,
 .detail-panel-leave-active {
